@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# config.yaml  –  Yoga Posture Correction System
+#
+# Edit freely; application reads this file at startup.
+# All paths are relative to the project root unless marked absolute.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Saved model artifacts ─────────────────────────────────────────────────────
+model:
+  dir: saved_yoga_model
+  mediapipe_task: pose_landmarker_full.task
+
+  # which classifier to use for inference: "rf" (Random Forest 82.79%)
+  # or "mlp" (Neural Network 77.56%)
+  active_classifier: rf
+
+# ── Practice / Guided Mode ────────────────────────────────────────────────────
+practice:
+  enabled: true                 # start in guided practice mode for testing
+  target_pose: "Virabhadrasana Two"  # default pose: Warrior 2 (easy to perform & test)
+
+# ── Inference settings ────────────────────────────────────────────────────────
+inference:
+  # seconds between full pose-inference runs (0.5 / 1 / 2 / 3 / 5)
+  interval_seconds: 1.0
+
+  # frames to accumulate for majority-vote smoothing (1 = no smoothing)
+  smoothing_window: 3
+
+  # minimum softmax / RF probability to display a pose name
+  confidence_threshold: 0.35
+
+  # MediaPipe landmark visibility threshold
+  visibility_threshold: 0.30
+
+# ── Camera ────────────────────────────────────────────────────────────────────
+camera:
+  device_index: 0
+  width: 1280
+  height: 720
+  mirror: true          # flip horizontally so it feels like a mirror
+
+# ── Overlay / visual feedback ─────────────────────────────────────────────────
+display:
+  show_landmarks: true
+  show_skeleton: true
+  show_angles: true
+  show_confidence: true
+  font_scale: 0.65
+  max_feedback_lines: 4   # max correction lines shown at once
+
+# ── Voice feedback ────────────────────────────────────────────────────────────
+voice:
+  enabled: true
+  rate: 155              # words per minute (pyttsx3)
+  volume: 0.9
+  # seconds to wait before repeating the same feedback message
+  cooldown_seconds: 12
