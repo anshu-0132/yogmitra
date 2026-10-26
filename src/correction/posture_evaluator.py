@@ -1,14 +1,9 @@
 """
 src/correction/posture_evaluator.py
 ─────────────────────────────────────
-Compares measured joint angles against the pose's reference ranges and
-returns structured evaluation results.
-
-Rules:
-  • Never use an angle that was computed from unreliable landmarks.
-  • Compute visibility of each joint in an angle triplet before trusting it.
-  • Report separately when a joint is simply not visible.
-  • Use the ANGLE_TRIPLETS map to know which landmark IDs underpin each angle.
+Evaluates posture alignment, calculates multi-tier reliability,
+determines deviation severity and natural directional action hints,
+and computes a composite 0–100% alignment score.
 """
 
 from __future__ import annotations
@@ -27,11 +22,26 @@ from src.pose.missing_landmarks import VISIBILITY_THRESHOLD
 class AngleCheck:
     angle_name: str
     display_name: str
-    value: Optional[float]         # None = not computable
-    target_range: tuple[float, float]
-    status: str                    # "ok" | "too_low" | "too_high" | "unavailable"
-    deviation: float               # degrees outside range (0 if ok)
-    reliable: bool                 # True if underlying landmarks were visible
+    value: Optional[float]              # Measured angle in degrees (None if unavailable)
+    target_range: tuple[float, float]   # Expected (min_deg, max_deg)
+    status: str                         # "ok" | "too_low" | "too_high" | "unavailable"
+    deviation: float                    # Absolute degrees outside range (0.0 if ok)
+    severity: str                       # "none" | "mild" | "moderate" | "major"
+    direction: str                      # "ok" | "bend" | "straighten" | "raise" | "lower" | "align"
+    action_hint: str                    # Short actionable natural English correction
+    reliable: bool                      # True if landmarks meet visibility requirements
+    reliability_tier: str               # "high" | "medium" | "low"
+
+    @property
+    def joint_name(self) -> str:
+        return self.display_name
+
+    @property
+    def deviation_magnitude(self) -> float:
+        return self.deviation
+
+
+PostureDeviation = AngleCheck
 
 
 @dataclass
@@ -40,58 +50,153 @@ class PostureEvaluation:
     checks: list[AngleCheck]
     imputed_fraction: float
     has_reference: bool
-    overall_status: str            # "correct" | "needs_work" | "no_reference" | "low_visibility"
+    overall_status: str                 # "correct" | "needs_work" | "no_reference" | "low_visibility"
+    alignment_score: float              # 0.0 to 100.0 percentage score
+    primary_check: Optional[AngleCheck] # The most critical deviation requiring correction
 
 
-def get_adapted_ranges(pose_name: str, feature_dict: dict) -> dict[str, tuple[float, float]]:
+# ── Directional action generator ──────────────────────────────────────────────
+
+def _derive_action_hint(
+    angle_name: str,
+    display_name: str,
+    status: str,
+    deviation: float,
+    severity: str,
+    is_front_knee: bool = False,
+    is_rear_knee: bool = False,
+) -> tuple[str, str]:
     """
-    Return reference angle ranges adapted to the user's active side.
-    For asymmetric poses (Warrior 1/2, lunges), detects whether left or right
-    leg is forward so the user can perform the pose on either side.
+    Returns (direction, action_hint) with human-coach natural phrasing.
+    """
+    if status == "ok":
+        return "ok", f"{display_name.capitalize()} is well aligned."
+
+    if status == "unavailable":
+        return "align", f"Bring your {display_name} clearly into camera view."
+
+    # Specific limb heuristics
+    if is_front_knee:
+        if status == "too_high":  # angle is open (> 115°), knee needs more bend
+            direction = "bend"
+            if severity == "mild":
+                hint = "Bend your front knee a little more."
+            else:
+                hint = "Bend your front knee deeper toward 90 degrees."
+            return direction, hint
+        else:  # angle is acute (< 85°), knee bent too much forward
+            direction = "straighten"
+            return direction, "Ease back your front knee so it stays over your ankle."
+
+    if is_rear_knee:
+        direction = "straighten"
+        return direction, "Keep your rear knee and leg straight."
+
+    if "elbow" in angle_name or "arm" in display_name:
+        if status == "too_low":
+            return "straighten", "Extend and straighten your arms fully."
+        else:
+            return "bend", "Avoid locking your elbows completely."
+
+    if "shoulder" in angle_name:
+        if status == "too_low":
+            return "raise", "Raise your arms slightly higher."
+        else:
+            return "lower", "Relax your shoulders away from your ears."
+
+    if "hip" in angle_name:
+        if status == "too_low":
+            return "straighten", "Open and lengthen through your hips."
+        else:
+            return "bend", "Hinge comfortably at the hips."
+
+    # General fallback
+    if status == "too_low":
+        return "straighten", f"Straighten your {display_name} slightly."
+    else:
+        return "bend", f"Bend your {display_name} a little more."
+
+
+# ── Bilateral Asymmetric Lunge Adaptation ────────────────────────────────────
+
+def get_adapted_ranges(
+    pose_name: str,
+    feature_dict: dict,
+    user_profile: Optional[dict] = None,
+) -> tuple[dict[str, tuple[float, float]], dict[str, str]]:
+    """
+    Return reference angle ranges adapted to the user's active side and
+    optional personalized calibration tolerances.
     """
     base = REFERENCE_RANGES.get(pose_name)
     if not base:
-        return {}
-    ranges = dict(base)
+        return {}, {}
 
-    if pose_name in ("Virabhadrasana One", "Virabhadrasana Two", "Utthita Parsvakonasana", "Anjaneyasana", "Parsva Virabhadrasana"):
+    ranges = dict(base)
+    role_map: dict[str, str] = {}  # angle_name -> role description (e.g. "front knee")
+
+    # Dynamic leading leg detection for asymmetric lunges
+    lunge_poses = (
+        "Virabhadrasana One",
+        "Virabhadrasana Two",
+        "Utthita Parsvakonasana",
+        "Anjaneyasana",
+        "Parsva Virabhadrasana",
+    )
+    if pose_name in lunge_poses:
         lk = feature_dict.get("left_knee_angle", np.nan)
         rk = feature_dict.get("right_knee_angle", np.nan)
-        # If right knee is bent deeper than left knee, right is the leading front leg
+        # If right knee is bent deeper than left knee, right is the leading leg
         if np.isfinite(lk) and np.isfinite(rk) and rk < lk:
             ranges["right_knee_angle"] = (85, 115)
             ranges["left_knee_angle"] = (160, 185)
+            role_map["right_knee_angle"] = "front knee"
+            role_map["left_knee_angle"] = "rear leg"
         else:
             ranges["left_knee_angle"] = (85, 115)
             ranges["right_knee_angle"] = (160, 185)
+            role_map["left_knee_angle"] = "front knee"
+            role_map["right_knee_angle"] = "rear leg"
 
-    elif pose_name == "Vrksasana":
+    elif pose_name == "Vrksasana":  # Tree Pose
         lk = feature_dict.get("left_knee_angle", np.nan)
         rk = feature_dict.get("right_knee_angle", np.nan)
         if np.isfinite(lk) and np.isfinite(rk) and rk < lk:
             ranges["right_knee_angle"] = (35, 75)
             ranges["left_knee_angle"] = (160, 185)
+            role_map["right_knee_angle"] = "raised foot knee"
+            role_map["left_knee_angle"] = "standing leg"
         else:
             ranges["left_knee_angle"] = (35, 75)
             ranges["right_knee_angle"] = (160, 185)
+            role_map["left_knee_angle"] = "raised foot knee"
+            role_map["right_knee_angle"] = "standing leg"
 
-    return ranges
+    # Apply personalized tolerance multiplier if calibration profile exists
+    if user_profile and "tolerance_multiplier" in user_profile:
+        mult = float(user_profile.get("tolerance_multiplier", 1.0))
+        if 0.8 <= mult <= 1.4 and mult != 1.0:
+            for k, (low, high) in ranges.items():
+                span = (high - low) / 2.0
+                mid = (high + low) / 2.0
+                ranges[k] = (round(mid - span * mult, 1), round(mid + span * mult, 1))
 
+    return ranges, role_map
+
+
+# ── Main Evaluator ────────────────────────────────────────────────────────────
 
 def evaluate(
     pose_name: str,
     feature_dict: dict,
     landmarks: list[dict],
     imputed_flags: list[int],
-    imputed_fraction_limit: float = 0.25,
+    imputed_fraction_limit: float = 0.35,
+    user_profile: Optional[dict] = None,
 ) -> PostureEvaluation:
     """
-    Evaluate posture alignment for the predicted pose.
-
-    pose_name     – classifier output (must match REFERENCE_RANGES key)
-    feature_dict  – 39-key dict from geometry.extract_features()
-    landmarks     – 33-element list of {x,y,z,visibility} dicts
-    imputed_flags – 33-element list of ints (1 = estimated)
+    Evaluates posture against biomechanical targets with multi-tier reliability,
+    severity categorization, and composite 0-100% alignment scoring.
     """
     imputed_fraction = float(np.mean(imputed_flags)) if imputed_flags else 0.0
 
@@ -102,9 +207,11 @@ def evaluate(
             imputed_fraction=imputed_fraction,
             has_reference=pose_name in REFERENCE_RANGES,
             overall_status="low_visibility",
+            alignment_score=0.0,
+            primary_check=None,
         )
 
-    ranges = get_adapted_ranges(pose_name, feature_dict)
+    ranges, role_map = get_adapted_ranges(pose_name, feature_dict, user_profile)
     if not ranges:
         return PostureEvaluation(
             pose_name=pose_name,
@@ -112,28 +219,49 @@ def evaluate(
             imputed_fraction=imputed_fraction,
             has_reference=False,
             overall_status="no_reference",
+            alignment_score=0.0,
+            primary_check=None,
         )
 
     checks: list[AngleCheck] = []
     any_issues = False
+    valid_scores: list[float] = []
 
     for angle_name, (low, high) in ranges.items():
-        display = JOINT_DISPLAY_NAMES.get(angle_name, angle_name.replace("_", " "))
+        role = role_map.get(angle_name)
+        display = role if role else JOINT_DISPLAY_NAMES.get(angle_name, angle_name.replace("_", " "))
 
-        # ── Landmark reliability ───────────────────────────────────────────
+        # ── Landmark Reliability Tier ─────────────────────────────────────────
         triplet_ids = ANGLE_TRIPLETS.get(angle_name)
+        tier = "high"
         reliable = True
+
         if triplet_ids:
+            vis_scores = []
             for lm_id in triplet_ids:
                 if lm_id >= len(landmarks):
-                    reliable = False
-                    break
-                vis = float(landmarks[lm_id].get("visibility", 0.0))
-                if vis < VISIBILITY_THRESHOLD:
-                    reliable = False
-                    break
+                    vis_scores.append(0.0)
+                else:
+                    vis_scores.append(float(landmarks[lm_id].get("visibility", 0.0)))
 
-        # ── Angle value ────────────────────────────────────────────────────
+            min_vis = min(vis_scores) if vis_scores else 0.0
+            if min_vis < VISIBILITY_THRESHOLD:
+                tier = "low"
+                reliable = False
+            elif min_vis < 0.50:
+                tier = "medium"
+                reliable = True
+            else:
+                tier = "high"
+                reliable = True
+
+        # Check imputation for this angle's joints
+        if triplet_ids and imputed_flags:
+            if any(lm_id < len(imputed_flags) and imputed_flags[lm_id] for lm_id in triplet_ids):
+                if tier == "high":
+                    tier = "medium"
+
+        # ── Angle Value ───────────────────────────────────────────────────────
         value_raw = feature_dict.get(angle_name, np.nan)
         try:
             value = float(value_raw)
@@ -141,6 +269,7 @@ def evaluate(
             value = np.nan
 
         if not reliable or not np.isfinite(value):
+            action_hint = f"Keep your {display} clearly visible."
             checks.append(AngleCheck(
                 angle_name=angle_name,
                 display_name=display,
@@ -148,11 +277,18 @@ def evaluate(
                 target_range=(low, high),
                 status="unavailable",
                 deviation=0.0,
+                severity="none",
+                direction="align",
+                action_hint=action_hint,
                 reliable=False,
+                reliability_tier="low",
             ))
             continue
 
-        # ── Compare against range ──────────────────────────────────────────
+        # ── Compare Against Target Range ──────────────────────────────────────
+        is_front = (role == "front knee")
+        is_rear = (role == "rear leg")
+
         if value < low:
             status = "too_low"
             deviation = low - value
@@ -165,6 +301,32 @@ def evaluate(
             status = "ok"
             deviation = 0.0
 
+        # Severity
+        if deviation == 0.0:
+            severity = "none"
+        elif deviation <= 12.0:
+            severity = "mild"
+        elif deviation <= 25.0:
+            severity = "moderate"
+        else:
+            severity = "major"
+
+        # Action hint
+        direction, action_hint = _derive_action_hint(
+            angle_name=angle_name,
+            display_name=display,
+            status=status,
+            deviation=deviation,
+            severity=severity,
+            is_front_knee=is_front,
+            is_rear_knee=is_rear,
+        )
+
+        # Joint alignment score contribution (100 down to 0)
+        deduction = min(100.0, deviation * 2.0)
+        check_score = max(0.0, 100.0 - deduction)
+        valid_scores.append(check_score)
+
         checks.append(AngleCheck(
             angle_name=angle_name,
             display_name=display,
@@ -172,8 +334,23 @@ def evaluate(
             target_range=(low, high),
             status=status,
             deviation=round(deviation, 1),
+            severity=severity,
+            direction=direction,
+            action_hint=action_hint,
             reliable=True,
+            reliability_tier=tier,
         ))
+
+    # Overall alignment score
+    if valid_scores:
+        overall_score = round(float(np.mean(valid_scores)), 1)
+    else:
+        overall_score = 0.0
+
+    # Pick primary check: highest deviation among reliable checks
+    deviant_checks = [c for c in checks if c.status != "ok" and c.reliable]
+    deviant_checks.sort(key=lambda c: -c.deviation)
+    primary_check = deviant_checks[0] if deviant_checks else None
 
     overall = "needs_work" if any_issues else "correct"
     return PostureEvaluation(
@@ -182,4 +359,6 @@ def evaluate(
         imputed_fraction=imputed_fraction,
         has_reference=True,
         overall_status=overall,
+        alignment_score=overall_score,
+        primary_check=primary_check,
     )

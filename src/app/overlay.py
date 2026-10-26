@@ -35,6 +35,7 @@ def draw_skeleton(
     landmarks: list[dict],
     show_landmarks: bool = True,
     show_skeleton: bool  = True,
+    highlight_joint_ids: Optional[set[int]] = None,
 ) -> np.ndarray:
     """Draw joints and connections onto the frame (in-place, also returns frame)."""
     h, w = frame.shape[:2]
@@ -48,13 +49,20 @@ def draw_skeleton(
         pts[i] = (x, y)
         if show_landmarks:
             vis = float(lm.get("visibility", 0.0))
-            colour = CLR_JOINT if vis >= 0.30 else (80, 80, 80)
-            cv2.circle(frame, (x, y), 5, colour, -1)
+            if highlight_joint_ids and i in highlight_joint_ids:
+                # Pulsing / prominent highlight for deviating joint
+                cv2.circle(frame, (x, y), 9, CLR_CORRECT, -1, cv2.LINE_AA)
+                cv2.circle(frame, (x, y), 12, CLR_WHITE, 2, cv2.LINE_AA)
+            else:
+                colour = CLR_JOINT if vis >= 0.30 else (80, 80, 80)
+                cv2.circle(frame, (x, y), 5, colour, -1, cv2.LINE_AA)
 
     if show_skeleton:
         for (a, b) in SKELETON_CONNECTIONS:
             if a in pts and b in pts:
-                cv2.line(frame, pts[a], pts[b], CLR_BONE, 2)
+                # If both ends are highlighted, draw connecting line in amber
+                line_col = CLR_WARN if (highlight_joint_ids and (a in highlight_joint_ids or b in highlight_joint_ids)) else CLR_BONE
+                cv2.line(frame, pts[a], pts[b], line_col, 2, cv2.LINE_AA)
 
     return frame
 
@@ -100,13 +108,14 @@ def draw_hud(
     max_lines: int = 4,
     target_pose: Optional[str] = None,
     landmarks: Optional[list[dict]] = None,
+    alignment_score: Optional[float] = None,
 ) -> np.ndarray:
     """Draw the full HUD panel at the top of the frame."""
     h, w = frame.shape[:2]
     panel_h = 42 + max_lines * 26 + 32
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (w, panel_h), CLR_PANEL, -1)
-    cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
+    cv2.addWeighted(overlay, 0.70, frame, 0.30, 0, frame)
 
     lh = 26   # line height in pixels
     x0 = 12
@@ -125,6 +134,11 @@ def draw_hud(
     interval_str = f"  |  Interval: {inference_interval:.1f}s"
     voice_str = "  |  Voice: ON" if voice_enabled else "  |  Voice: OFF"
 
+    # Alignment score badge
+    score_str = ""
+    if alignment_score is not None and alignment_score > 0:
+        score_str = f"  |  Score: {alignment_score:.0f}%"
+
     if target_pose:
         if prediction.pose_name == target_pose and prediction.status == "detected":
             header_str = f"PRACTICE: {target_pose} [Match {prediction.confidence*100:.0f}%]"
@@ -142,7 +156,7 @@ def draw_hud(
             "no_person":     CLR_CORRECT,
         }.get(prediction.status, CLR_INFO)
 
-    cv2.putText(frame, f"{header_str}{interval_str}{voice_str}",
+    cv2.putText(frame, f"{header_str}{score_str}{interval_str}{voice_str}",
                 (x0, lh), cv2.FONT_HERSHEY_SIMPLEX,
                 font_scale, status_colour, 1, cv2.LINE_AA)
 
@@ -179,13 +193,54 @@ def draw_hud(
     return frame
 
 
+def draw_calibration_overlay(
+    frame: np.ndarray,
+    is_active: bool,
+    progress_pct: int,
+    status_message: str,
+) -> np.ndarray:
+    """Draws an interactive calibration progress banner across the screen center."""
+    if not is_active:
+        return frame
+
+    h, w = frame.shape[:2]
+    box_w, box_h = min(560, w - 40), 100
+    bx = (w - box_w) // 2
+    by = (h - box_h) // 2
+
+    # Translucent card background
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (bx, by), (bx + box_w, by + box_h), (15, 18, 22), -1)
+    cv2.rectangle(overlay, (bx, by), (bx + box_w, by + box_h), (60, 200, 255), 2)
+    cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+
+    # Title & status
+    cv2.putText(frame, "BIOMECHANICAL CALIBRATION (Tadasana)", (bx + 20, by + 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.putText(frame, status_message, (bx + 20, by + 55),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (180, 220, 255), 1, cv2.LINE_AA)
+
+    # Progress bar
+    bar_x = bx + 20
+    bar_y = by + 68
+    bar_w = box_w - 40
+    bar_h = 14
+    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (40, 45, 55), -1)
+    fill_w = int(bar_w * (max(0, min(100, progress_pct)) / 100.0))
+    if fill_w > 0:
+        cv2.rectangle(frame, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h), (80, 210, 120), -1)
+    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (80, 90, 105), 1)
+
+    return frame
+
+
 def draw_key_hints(frame: np.ndarray) -> np.ndarray:
     """Tiny key-binding reminder at the bottom of the frame."""
     h, w = frame.shape[:2]
     hints = (
-        "Q=Quit  T/N=Change Pose  M=Toggle Guided/Free  "
-        "V=Voice  A=Angles  +/-=Interval  S=Screenshot"
+        "Q=Quit  T/N=Pose  M=Guided/Free  C=Calibrate  "
+        "V=Voice  A=Angles  +/-=Interval  S=Shot"
     )
     cv2.putText(frame, hints, (10, h - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.40, CLR_INFO, 1, cv2.LINE_AA)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, CLR_INFO, 1, cv2.LINE_AA)
     return frame

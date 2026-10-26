@@ -1,14 +1,8 @@
 """
 src/correction/feedback_engine.py
 ───────────────────────────────────
-Converts PostureEvaluation + PosePrediction into structured FeedbackItem
-objects, deduplicates repeated messages, and controls the voice cooldown.
-
-Feedback priority:
-  1. "No person detected" / "Low confidence"
-  2. Low-visibility warning
-  3. Most-deviant angle correction  (only when landmark reliable)
-  4. "Looks good" acknowledgement
+Intelligent feedback engine delivering natural coach-style audio cues,
+multi-tier confidence gating, per-joint cooldowns, and jitter dampening.
 """
 
 from __future__ import annotations
@@ -24,31 +18,45 @@ from src.models.inference import PosePrediction
 @dataclass
 class FeedbackItem:
     pose_name: str
-    body_part: str                # e.g. "left knee"
-    issue: str                    # e.g. "too low"
-    instruction: str              # human-readable correction sentence
+    body_part: str                # e.g. "front knee", "rear leg", "arms"
+    issue: str                    # e.g. "too_low", "too_high", "low_confidence"
+    instruction: str              # Concise natural English sentence for display & speech
     severity: str                 # "info" | "warning" | "correction"
-    reliable: bool                # based on visible landmarks
-    confidence_ok: bool           # prediction confidence above threshold
+    reliable: bool                # Based on visible landmarks
+    confidence_ok: bool           # Prediction confidence above threshold
+    reliability_tier: str = "high"# "high" | "medium" | "low"
 
 
 class FeedbackEngine:
     """
-    Stateful engine that:
-      • converts evaluation + prediction → FeedbackItems
-      • deduplicates: does not enqueue voice speech for a repeated message
-        until cooldown_seconds have passed
-      • exposes feedback_text() for HUD overlay and speech_queue for TTS
+    Translates PostureEvaluation into prioritized feedback items and audio cues.
+
+    Features:
+      • Per-joint cooldowns (prevents repeating the same joint cue within 7s)
+      • Instant announcement when a different joint deviates
+      • Minimum error persistence (dampens single-frame tracking noise)
+      • Obsolete queue flushing when posture updates
+      • Multi-tier reliability suppression of false corrections
     """
 
-    def __init__(self, cooldown_seconds: float = 12.0, max_display: int = 4):
+    def __init__(
+        self,
+        cooldown_seconds: float = 7.0,
+        max_display: int = 4,
+        min_persistence_frames: int = 2,
+    ):
         self._cooldown = cooldown_seconds
         self._max_display = max_display
-        self._last_spoken: dict[str, float] = {}   # msg → timestamp
+        self._min_persistence = min_persistence_frames
+
+        # Tracking state
+        self._last_spoken_by_joint: dict[str, float] = {}  # joint_key -> timestamp
+        self._last_spoken_time: float = 0.0                # global pacing
+        self._consecutive_error_counts: dict[str, int] = {}# joint_key -> frames seen
         self._speech_queue: list[str] = []
         self._current_items: list[FeedbackItem] = []
 
-    # ── Main update ───────────────────────────────────────────────────────────
+    # ── Main Update ───────────────────────────────────────────────────────────
 
     def update(
         self,
@@ -57,146 +65,178 @@ class FeedbackEngine:
         target_pose: Optional[str] = None,
     ) -> list[FeedbackItem]:
         """
-        Process latest prediction + evaluation.
-        If target_pose is specified, guides the user toward that specific pose.
-        Returns a list of FeedbackItems for the current frame.
+        Processes prediction and posture evaluation.
+        Returns a list of prioritized FeedbackItems for HUD and enqueues audio.
         """
         items: list[FeedbackItem] = []
+        now = time.monotonic()
 
-        # ── No person ─────────────────────────────────────────────────────────
+        # ── 1. No Person Detected ─────────────────────────────────────────────
         if prediction.status == "no_person":
+            self._consecutive_error_counts.clear()
+            msg = "No person detected. Please stand in front of the camera."
             items.append(FeedbackItem(
                 pose_name="",
                 body_part="",
-                issue="no person",
-                instruction="No person detected. Please stand in front of the camera.",
+                issue="no_person",
+                instruction=msg,
                 severity="info",
                 reliable=False,
                 confidence_ok=False,
+                reliability_tier="low",
             ))
-            self._enqueue_speech(items[-1].instruction)
+            self._enqueue_speech("system", msg, min_interval=6.0)
             self._current_items = items
             return items
 
-        # ── Low visibility ────────────────────────────────────────────────────
+        # ── 2. Severe Low Visibility / Occlusion ──────────────────────────────
         if evaluation and evaluation.overall_status == "low_visibility":
-            msg = "Some joints are occluded. Adjust position so your full body is visible."
+            self._consecutive_error_counts.clear()
+            msg = "Full body not clearly visible. Step back so your legs and feet are in view."
             items.append(FeedbackItem(
                 pose_name=target_pose or prediction.pose_name,
-                body_part="",
-                issue="low visibility",
+                body_part="body",
+                issue="low_visibility",
                 instruction=msg,
                 severity="warning",
                 reliable=False,
                 confidence_ok=True,
+                reliability_tier="low",
             ))
-            self._enqueue_speech(msg)
+            self._enqueue_speech("visibility", msg, min_interval=8.0)
             self._current_items = items
             return items
 
-        # ── If in Target Pose Mode, evaluate directly toward target pose ─────
+        # ── 3. Target Pose Guided Mode ────────────────────────────────────────
         if target_pose and evaluation and evaluation.has_reference:
             active_pose = target_pose
-            corrections = _build_corrections(evaluation)
+            corrections = [c for c in evaluation.checks if c.status != "ok"]
+
             if not corrections:
+                self._consecutive_error_counts.clear()
+                congrats = f"Good form! {active_pose} posture looks correct."
                 items.append(FeedbackItem(
                     pose_name=active_pose,
                     body_part="",
-                    issue="",
-                    instruction=f"Great form! {active_pose} alignment looks correct.",
+                    issue="perfect",
+                    instruction=congrats,
                     severity="info",
                     reliable=True,
                     confidence_ok=True,
+                    reliability_tier="high",
                 ))
-                self._enqueue_speech(items[-1].instruction)
+                self._enqueue_speech(f"{active_pose}_ok", congrats, min_interval=12.0)
             else:
-                corrections.sort(key=lambda c: (-c.deviation, c.status))
+                # Sort: major severity first, then deviation magnitude
+                severity_rank = {"major": 3, "moderate": 2, "mild": 1, "none": 0}
+                corrections.sort(key=lambda c: (-severity_rank.get(c.severity, 0), -c.deviation))
+
                 for check in corrections[: self._max_display]:
-                    msg = _check_to_sentence(check)
+                    severity_type = "correction" if check.reliable else "warning"
                     items.append(FeedbackItem(
                         pose_name=active_pose,
                         body_part=check.display_name,
                         issue=check.status,
-                        instruction=msg,
-                        severity="correction" if check.reliable else "warning",
+                        instruction=check.action_hint,
+                        severity=severity_type,
                         reliable=check.reliable,
                         confidence_ok=True,
+                        reliability_tier=check.reliability_tier,
                     ))
-                primary = items[0].instruction
-                self._enqueue_speech(primary)
+
+                # Primary audio guidance from top deviant check
+                top_check = corrections[0]
+                joint_key = f"{active_pose}_{top_check.angle_name}"
+                self._consecutive_error_counts[joint_key] = self._consecutive_error_counts.get(joint_key, 0) + 1
+
+                # Audio policy: high/medium reliability + error persists >= 2 frames
+                if (top_check.reliability_tier in ("high", "medium") and
+                        self._consecutive_error_counts[joint_key] >= self._min_persistence):
+                    self._enqueue_speech(top_check.angle_name, top_check.action_hint, min_interval=self._cooldown)
 
             self._current_items = items
             return items
 
-        # ── Free Auto-Detect Mode: check low confidence ───────────────────────
+        # ── 4. Free Auto-Detect Mode: Low Confidence ──────────────────────────
         if prediction.status == "low_confidence":
-            msg = (
-                f"Prediction uncertain ({prediction.confidence*100:.0f}%). "
-                "Ensure your full body is visible."
-            )
+            self._consecutive_error_counts.clear()
+            msg = f"Detecting pose ({prediction.confidence*100:.0f}%). Hold your posture clearly."
             items.append(FeedbackItem(
                 pose_name=prediction.pose_name,
                 body_part="",
-                issue="low confidence",
+                issue="low_confidence",
                 instruction=msg,
                 severity="warning",
                 reliable=False,
                 confidence_ok=False,
+                reliability_tier="medium",
             ))
-            self._enqueue_speech(msg)
+            self._enqueue_speech("low_confidence", msg, min_interval=self._cooldown)
             self._current_items = items
             return items
 
-        # ── No reference ranges ───────────────────────────────────────────────
+        # ── 5. Free Auto-Detect Mode: Pose Recognized Without Rules ───────────
         if evaluation is None or not evaluation.has_reference:
+            self._consecutive_error_counts.clear()
+            msg = f"Pose detected: {prediction.pose_name}."
             items.append(FeedbackItem(
                 pose_name=prediction.pose_name,
                 body_part="",
-                issue="no reference",
-                instruction=f"Pose recognised: {prediction.pose_name}. No correction rules configured yet.",
+                issue="no_reference",
+                instruction=msg,
                 severity="info",
                 reliable=True,
                 confidence_ok=True,
+                reliability_tier="high",
             ))
             self._current_items = items
             return items
 
-        # ── Generate per-angle corrections ────────────────────────────────────
-        corrections = _build_corrections(evaluation)
-
+        # ── 6. Free Auto-Detect Mode: Evaluated Corrections ───────────────────
+        corrections = [c for c in evaluation.checks if c.status != "ok"]
         if not corrections:
+            self._consecutive_error_counts.clear()
+            congrats = f"Good form! {prediction.pose_name} alignment looks correct."
             items.append(FeedbackItem(
                 pose_name=prediction.pose_name,
                 body_part="",
-                issue="",
-                instruction=f"Good form! {prediction.pose_name} alignment looks correct.",
+                issue="perfect",
+                instruction=congrats,
                 severity="info",
                 reliable=True,
                 confidence_ok=True,
+                reliability_tier="high",
             ))
-            self._enqueue_speech(items[-1].instruction)
+            self._enqueue_speech(f"{prediction.pose_name}_ok", congrats, min_interval=12.0)
         else:
-            # Sort: most deviant first, then unavailable joints
-            corrections.sort(key=lambda c: (-c.deviation, c.status))
+            severity_rank = {"major": 3, "moderate": 2, "mild": 1, "none": 0}
+            corrections.sort(key=lambda c: (-severity_rank.get(c.severity, 0), -c.deviation))
+
             for check in corrections[: self._max_display]:
-                msg = _check_to_sentence(check)
+                severity_type = "correction" if check.reliable else "warning"
                 items.append(FeedbackItem(
                     pose_name=prediction.pose_name,
                     body_part=check.display_name,
                     issue=check.status,
-                    instruction=msg,
-                    severity="correction" if check.reliable else "warning",
+                    instruction=check.action_hint,
+                    severity=severity_type,
                     reliable=check.reliable,
                     confidence_ok=True,
+                    reliability_tier=check.reliability_tier,
                 ))
-            # Speak only the top-priority correction
-            primary = items[0].instruction
-            self._enqueue_speech(primary)
+
+            top_check = corrections[0]
+            joint_key = f"{prediction.pose_name}_{top_check.angle_name}"
+            self._consecutive_error_counts[joint_key] = self._consecutive_error_counts.get(joint_key, 0) + 1
+
+            if (top_check.reliability_tier in ("high", "medium") and
+                    self._consecutive_error_counts[joint_key] >= self._min_persistence):
+                self._enqueue_speech(top_check.angle_name, top_check.action_hint, min_interval=self._cooldown)
 
         self._current_items = items
         return items
 
-    # ── Speech queue access ───────────────────────────────────────────────────
+    # ── Speech Queue Access ───────────────────────────────────────────────────
 
     def pop_speech(self) -> Optional[str]:
         """Pop and return the next message to speak, or None."""
@@ -206,38 +246,29 @@ class FeedbackEngine:
     def current_items(self) -> list[FeedbackItem]:
         return self._current_items
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # ── Internal Speech Dispatch & Pacing ─────────────────────────────────────
 
-    def _enqueue_speech(self, msg: str) -> None:
+    def _enqueue_speech(self, key: str, phrase: str, min_interval: float) -> None:
         now = time.monotonic()
-        last = self._last_spoken.get(msg, 0.0)
-        if now - last >= self._cooldown:
-            self._speech_queue.append(msg)
-            self._last_spoken[msg] = now
+        # Per-key cooldown check
+        last_key_time = self._last_spoken_by_joint.get(key, 0.0)
+        if now - last_key_time < min_interval:
+            return
+
+        # Global utterance spacing (avoid rapid machine-gun sentences)
+        if now - self._last_spoken_time < 2.2:
+            return
+
+        # Keep speech queue fresh (replace older unuttered instruction)
+        self._speech_queue.clear()
+        self._speech_queue.append(phrase)
+        self._last_spoken_by_joint[key] = now
+        self._last_spoken_time = now
 
     def clear(self) -> None:
-        self._current_items = []
-        self._speech_queue = []
-        self._last_spoken = {}
-
-
-# ── Private helpers ───────────────────────────────────────────────────────────
-
-def _build_corrections(ev: PostureEvaluation) -> list[AngleCheck]:
-    return [c for c in ev.checks if c.status != "ok"]
-
-
-def _check_to_sentence(check: AngleCheck) -> str:
-    if check.status == "unavailable":
-        return f"Your {check.display_name} is not clearly visible; please adjust position."
-    low, high = check.target_range
-    val_str = f"{check.value:.1f}°" if check.value is not None else "?"
-    if check.status == "too_low":
-        return (
-            f"Your {check.display_name} angle is {val_str} — straighten it "
-            f"by about {check.deviation:.0f}° (target {low:.0f}°–{high:.0f}°)."
-        )
-    return (
-        f"Your {check.display_name} angle is {val_str} — bend it "
-        f"by about {check.deviation:.0f}° more (target {low:.0f}°–{high:.0f}°)."
-    )
+        """Clear all active feedback and cooldown history."""
+        self._current_items.clear()
+        self._speech_queue.clear()
+        self._last_spoken_by_joint.clear()
+        self._consecutive_error_counts.clear()
+        self._last_spoken_time = 0.0

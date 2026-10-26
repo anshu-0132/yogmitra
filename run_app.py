@@ -56,9 +56,24 @@ def main() -> None:
                         help="Start in free auto-detect mode across all 47 poses")
     parser.add_argument("--no-voice", action="store_true",
                         help="Disable voice feedback")
+    parser.add_argument("--test-voice", action="store_true",
+                        help="Run audio speaker diagnostic test and exit")
+    parser.add_argument("--history", action="store_true",
+                        help="Display practice session history from SQLite and exit")
     parser.add_argument("--camera", type=int, default=None,
                         help="Camera device index (overrides config)")
     args = parser.parse_args()
+
+    if args.test_voice:
+        from src.app.voice import test_diagnostic
+        success = test_diagnostic()
+        sys.exit(0 if success else 1)
+
+    if args.history:
+        from src.correction.progress_tracker import ProgressTracker
+        tracker = ProgressTracker()
+        print("\n" + tracker.format_history_table(limit=15) + "\n")
+        sys.exit(0)
 
     cfg_path = ROOT / args.config
     if not cfg_path.exists():

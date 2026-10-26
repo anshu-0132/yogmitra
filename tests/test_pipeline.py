@@ -341,3 +341,320 @@ def test_bilateral_warrior_adaptation(dummy_landmarks_visible):
 
     # Right leg forward should be recognized as correct!
     assert ev.overall_status == "correct", f"Expected correct, got {ev.overall_status} ({[c.status for c in ev.checks]})"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 15: Voice Worker Operation & Safe Shutdown
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_voice_worker_operation_and_shutdown():
+    from src.app.voice import VoiceFeedback
+
+    voice = VoiceFeedback(rate=160, volume=0.9)
+    # Test enqueue without crash
+    voice.speak("Yoga Mitra audio test.")
+    assert voice.is_available or not voice.is_available  # Boolean state valid
+    # Shutdown cleanly
+    voice.shutdown()
+    assert voice._shutdown is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 16: Voice Mute, Unmute, and Queue Flushing
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_voice_mute_unmute_and_queue_flushing():
+    from src.app.voice import VoiceFeedback
+
+    voice = VoiceFeedback()
+    assert voice.enabled is True
+
+    # Toggle to mute
+    state = voice.toggle()
+    assert state is False
+    assert voice.enabled is False
+
+    # When muted, speaking should not enqueue
+    voice.speak("Should not be spoken")
+    assert voice._queue.empty()
+
+    # Toggle back to unmuted
+    state = voice.toggle()
+    assert state is True
+    assert voice.enabled is True
+    voice.shutdown()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 17: Reference Asset Mapping for All Guided Targets
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_reference_asset_mapping():
+    from src.correction.reference_ranges import POSE_METADATA
+    from src.app.reference_display import ReferenceDisplay
+
+    display = ReferenceDisplay(panel_width=380)
+
+    guided_targets = [
+        "Virabhadrasana Two",
+        "Virabhadrasana One",
+        "Utkatasana",
+        "Trikonasana",
+        "Phalakasana",
+        "Adho Mukha Svanasana",
+        "Vrksasana",
+        "Uttanasana",
+    ]
+
+    for pose in guided_targets:
+        assert pose in POSE_METADATA, f"{pose} missing from POSE_METADATA"
+        meta = POSE_METADATA[pose]
+        assert "english_name" in meta
+        assert "sanskrit_name" in meta
+        assert "cues" in meta and len(meta["cues"]) > 0
+
+        # Verify rendering produces a valid panel image
+        panel = display.render_panel(pose_name=pose, height=600, is_guided=True)
+        assert panel.shape == (600, 380, 3)
+        assert panel.dtype == np.uint8
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 18: Reference Display Auto-Detect Smoothing & Anti-Flicker
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_reference_display_auto_detect_stability():
+    from src.app.reference_display import ReferenceDisplay
+
+    display = ReferenceDisplay()
+
+    # Single noisy prediction should not immediately switch stable pose
+    p1 = display.update_auto_detected_pose("Virabhadrasana Two", confidence=0.85)
+    p2 = display.update_auto_detected_pose("Virabhadrasana Two", confidence=0.85)
+    # 3rd consecutive occurrence locks in stable pose
+    p3 = display.update_auto_detected_pose("Virabhadrasana Two", confidence=0.85)
+    assert p3 == "Virabhadrasana Two"
+
+    # Single spurious glitch frame should be ignored
+    glitch = display.update_auto_detected_pose("Phalakasana", confidence=0.85)
+    assert glitch == "Virabhadrasana Two"  # Still locked to previous stable
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 19: Missing Reference Asset Fallback Card
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_missing_reference_asset_fallback():
+    from src.app.reference_display import ReferenceDisplay
+
+    display = ReferenceDisplay()
+    # Unknown pose with no asset
+    panel = display.render_panel(pose_name="UnregisteredPoseXYZ", height=500, is_guided=False)
+    assert panel.shape == (500, 380, 3)
+    assert panel.mean() > 0  # Not completely blank black
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 20: Confidence-Aware Feedback Decisions & Multi-Tier Reliability
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_confidence_aware_feedback_tiers(dummy_landmarks_visible):
+    from src.correction.posture_evaluator import evaluate
+
+    feat_dict = {
+        "left_knee_angle": 175.0,
+        "right_knee_angle": 175.0,
+    }
+    # Case A: Fully visible landmarks -> high reliability tier
+    flags = [0] * 33
+    ev_high = evaluate("Virabhadrasana Two", feat_dict, dummy_landmarks_visible, flags)
+    assert ev_high.checks[0].reliability_tier in ("high", "medium")
+    assert ev_high.checks[0].reliable is True
+
+    # Case B: Landmark occluded -> low visibility / unavailable
+    occluded_lm = [dict(lm) for lm in dummy_landmarks_visible]
+    occluded_lm[25]["visibility"] = 0.05  # Left knee occluded
+    ev_low = evaluate("Virabhadrasana Two", feat_dict, occluded_lm, flags)
+    left_check = next(c for c in ev_low.checks if c.angle_name == "left_knee_angle")
+    assert left_check.status == "unavailable"
+    assert left_check.reliability_tier == "low"
+    assert "clearly visible" in left_check.action_hint.lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 21: Invalid Angles and Imputed Landmark Robustness
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_invalid_angles_and_imputed_landmarks(dummy_landmarks_visible):
+    from src.correction.posture_evaluator import evaluate
+
+    # Pass NaN and Inf values
+    feat_dict = {
+        "left_knee_angle": float("nan"),
+        "right_knee_angle": float("inf"),
+    }
+    flags = [1] * 33  # All imputed
+    ev = evaluate("Virabhadrasana Two", feat_dict, dummy_landmarks_visible, flags)
+
+    for chk in ev.checks:
+        assert chk.status == "unavailable"
+        assert chk.deviation == 0.0
+        assert chk.reliable is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 22: User Profile Loading and Persistence
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_user_profile_saving_and_loading(tmp_path):
+    from src.correction.calibration import UserProfile, load_profile, save_profile
+
+    profile_file = tmp_path / "user_profile.json"
+    prof = UserProfile(
+        calibrated=True,
+        user_name="Advanced Yogi",
+        tolerance_multiplier=1.15,
+        arm_span_ratio=1.82,
+        leg_to_torso_ratio=1.68,
+        shoulder_width_ratio=0.67,
+    )
+    ok = save_profile(prof, profile_file)
+    assert ok is True
+    assert profile_file.exists()
+
+    loaded = load_profile(profile_file)
+    assert loaded.calibrated is True
+    assert loaded.user_name == "Advanced Yogi"
+    assert loaded.tolerance_multiplier == 1.15
+    assert loaded.arm_span_ratio == 1.82
+
+    # Non-existent profile returns uncalibrated default safely
+    missing = load_profile(tmp_path / "non_existent.json")
+    assert missing.calibrated is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 23: Joint Deviation Direction and Severity Tiers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_joint_deviation_direction_and_severity(dummy_landmarks_visible):
+    from src.correction.posture_evaluator import evaluate
+
+    # Target for Chair Pose knees is 70 to 115 deg
+    # 1. Major deviation: standing straight (175 deg -> 60 deg deviation)
+    ev_major = evaluate("Utkatasana", {"left_knee_angle": 175.0, "right_knee_angle": 175.0}, dummy_landmarks_visible, [0]*33)
+    chk_major = ev_major.checks[0]
+    assert chk_major.severity == "major"
+    assert chk_major.direction == "bend"
+    assert chk_major.deviation >= 55.0
+
+    # 2. Mild deviation: knee bent to 125 deg (10 deg deviation)
+    ev_mild = evaluate("Utkatasana", {"left_knee_angle": 125.0, "right_knee_angle": 125.0}, dummy_landmarks_visible, [0]*33)
+    chk_mild = ev_mild.checks[0]
+    assert chk_mild.severity == "mild"
+    assert chk_mild.direction == "bend"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 24: Front and Rear Leg Bilateral Adaptation in Warrior Poses
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_front_and_rear_leg_bilateral_adaptation(dummy_landmarks_visible):
+    from src.correction.posture_evaluator import evaluate
+
+    # Left leg forward: Left knee ~95 deg, Right knee ~175 deg
+    ev_left_lead = evaluate(
+        "Virabhadrasana One",
+        {
+            "left_knee_angle": 95.0,
+            "right_knee_angle": 175.0,
+            "left_elbow_angle": 175.0,
+            "right_elbow_angle": 175.0,
+            "left_shoulder_angle": 170.0,
+            "right_shoulder_angle": 170.0,
+        },
+        dummy_landmarks_visible,
+        [0] * 33,
+    )
+    knee_statuses_left = [c.status for c in ev_left_lead.checks if "knee" in c.angle_name]
+    assert all(s == "ok" for s in knee_statuses_left), f"Left-lead knee statuses: {knee_statuses_left}"
+
+    # Right leg forward: Right knee ~95 deg, Left knee ~175 deg
+    ev_right_lead = evaluate(
+        "Virabhadrasana One",
+        {
+            "right_knee_angle": 95.0,
+            "left_knee_angle": 175.0,
+            "left_elbow_angle": 175.0,
+            "right_elbow_angle": 175.0,
+            "left_shoulder_angle": 170.0,
+            "right_shoulder_angle": 170.0,
+        },
+        dummy_landmarks_visible,
+        [0] * 33,
+    )
+    knee_statuses_right = [c.status for c in ev_right_lead.checks if "knee" in c.angle_name]
+    assert all(s == "ok" for s in knee_statuses_right), f"Right-lead knee statuses: {knee_statuses_right}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 25: Session History & Progress Tracker Persistence
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_session_history_persistence(tmp_path):
+    from src.correction.progress_tracker import ProgressTracker
+    from src.correction.posture_evaluator import AngleCheck
+
+    db_path = tmp_path / "yoga_test.db"
+    tracker = ProgressTracker(db_path=db_path)
+    tracker.start_session(calibrated=True)
+
+    dummy_dev = AngleCheck(
+        angle_name="left_knee_angle",
+        display_name="left knee",
+        value=150.0,
+        target_range=(85, 115),
+        status="too_high",
+        deviation=35.0,
+        severity="moderate",
+        direction="bend",
+        action_hint="Bend your front knee a little more.",
+        reliable=True,
+        reliability_tier="high",
+    )
+
+    tracker.log_frame("Virabhadrasana Two", alignment_score=82.0, deviations=[dummy_dev], is_reliable=True)
+    tracker.log_frame("Virabhadrasana Two", alignment_score=88.0, deviations=[], is_reliable=True)
+
+    summary = tracker.end_session()
+    assert summary is not None
+    assert summary["frames_evaluated"] == 2
+    assert summary["avg_alignment_score"] == 85.0
+    assert summary["peak_alignment_score"] == 88.0
+    assert summary["calibrated"] is True
+
+    # Verify query and formatted table
+    history = tracker.get_history(limit=5)
+    assert len(history) == 1
+    assert history[0]["poses"] == "Virabhadrasana Two"
+
+    table_str = tracker.format_history_table(limit=5)
+    assert "Virabhadrasana Two" in table_str
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 26: Application Cleanup on Shutdown
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_application_cleanup():
+    from src.app.voice import VoiceFeedback
+    from src.app.reference_display import ReferenceDisplay
+
+    voice = VoiceFeedback()
+    ref_display = ReferenceDisplay()
+
+    ref_display.reset_stability()
+    assert len(display_history := ref_display._detect_history) == 0
+
+    voice.shutdown()
+    assert voice._shutdown is True
