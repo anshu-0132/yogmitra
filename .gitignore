@@ -17,3 +17,5 @@ screenshots/
 env/
 venv/
 ENV/
+# Archives
+*.zip

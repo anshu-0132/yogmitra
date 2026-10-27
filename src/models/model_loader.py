@@ -116,6 +116,98 @@ def load_artifacts(model_dir: str | Path) -> YogaArtifacts:
     )
 
 
+@dataclass
+class YogaArtifactsZenodo:
+    """Container for loaded Zenodo dual-task model artifacts."""
+    imputer: Any
+    scaler: Any
+    asana_label_encoder: Any
+    correctness_label_encoder: Any
+    feature_cols: list[str]
+    asana_model: Any                # Model A (10 Asanas)
+    verifier_model: Any             # Model B (Binary Right/Wrong)
+    class_names: list[str]          # 10 Asana names
+    correctness_names: list[str]    # ["Right", "Wrong"]
+    model_type: str = "rf"
+
+    @property
+    def n_classes(self) -> int:
+        return len(self.class_names)
+
+    @property
+    def n_features(self) -> int:
+        return len(self.feature_cols)
+
+
+def load_zenodo_artifacts(
+    model_dir: str | Path = "saved_yoga_model_zenodo",
+    active_classifier: Optional[str] = None,
+) -> YogaArtifactsZenodo:
+    """
+    Load Zenodo dual-task model artifacts from *model_dir*.
+    If *active_classifier* ('rf' or 'mlp') is specified and a corresponding
+    subdirectory exists, loads that sub-architecture; otherwise loads from *model_dir*.
+    Raises RuntimeError if artifacts have not been trained yet.
+    """
+    model_dir = Path(model_dir)
+    if active_classifier:
+        sub_dir = model_dir / active_classifier.lower()
+        if sub_dir.is_dir() and (sub_dir / "zenodo_preprocessing.joblib").exists():
+            model_dir = sub_dir
+
+    _require(
+        model_dir.is_dir(),
+        f"Zenodo model directory not found: {model_dir}. "
+        "Migration requires running the approved training pipeline (scripts/train_zenodo_models.py)."
+    )
+
+    prep_path = model_dir / "zenodo_preprocessing.joblib"
+    _require(prep_path.exists(), f"Missing Zenodo preprocessing artifact: {prep_path}")
+    prep = joblib.load(prep_path)
+
+    for key in ("imputer", "scaler", "asana_label_encoder", "correctness_label_encoder", "feature_cols", "class_names"):
+        _require(key in prep, f"zenodo_preprocessing.joblib missing key: '{key}'")
+
+    asana_path = model_dir / "zenodo_asana_classifier.joblib"
+    _require(asana_path.exists(), f"Missing Model A artifact: {asana_path}")
+    asana_model = joblib.load(asana_path)
+
+    verifier_path = model_dir / "zenodo_form_verifier.joblib"
+    _require(verifier_path.exists(), f"Missing Model B artifact: {verifier_path}")
+    verifier_model = joblib.load(verifier_path)
+
+    return YogaArtifactsZenodo(
+        imputer=prep["imputer"],
+        scaler=prep["scaler"],
+        asana_label_encoder=prep["asana_label_encoder"],
+        correctness_label_encoder=prep["correctness_label_encoder"],
+        feature_cols=prep["feature_cols"],
+        asana_model=asana_model,
+        verifier_model=verifier_model,
+        class_names=prep["class_names"],
+        correctness_names=prep.get("correctness_names", ["Right", "Wrong"]),
+        model_type=prep.get("model_type", "rf"),
+    )
+
+
+def load_profile_artifacts(profile: str = "kaggle", model_dir: Optional[str | Path] = None) -> Any:
+    """
+    Factory loader supporting profile switching:
+    - 'kaggle' (default): Loads 47-class Kaggle artifacts from saved_yoga_model/
+    - 'zenodo': Loads 10-class dual-task Zenodo artifacts from saved_yoga_model_zenodo/
+    """
+    p = profile.lower()
+    if p == "kaggle":
+        target = model_dir or "saved_yoga_model"
+        return load_artifacts(target)
+    elif p == "zenodo":
+        target = model_dir or "saved_yoga_model_zenodo"
+        return load_zenodo_artifacts(target)
+    else:
+        raise ValueError(f"Unknown model profile: '{profile}'. Supported: 'kaggle', 'zenodo'")
+
+
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(f"[ModelLoader] {message}")
+

@@ -62,41 +62,80 @@ To measure real-world performance when body joints are temporarily blocked or ou
 
 ## 4. Test Suite Verification
 
-All **26 automated test cases** pass with zero failures:
+All **38 automated test cases** across `tests/test_pipeline.py` (26 tests) and `tests/test_zenodo_pipeline.py` (12 tests) pass with zero failures:
 
 ```bash
-python -m pytest tests/test_pipeline.py -v
+python -m pytest tests/ -v
 ```
 
+```text
+tests/test_pipeline.py ..........................                        [ 68%]
+tests/test_zenodo_pipeline.py ............                               [100%]
+============================= 38 passed in 8.58s ==============================
 ```
-tests/test_pipeline.py::test_feature_vector_length_and_order PASSED      [  3%]
-tests/test_pipeline.py::test_rf_predict_returns_valid_class PASSED       [  7%]
-tests/test_pipeline.py::test_label_encoder_class_mapping PASSED          [ 11%]
-tests/test_pipeline.py::test_occluded_joints_produce_unavailable_checks PASSED [ 15%]
-tests/test_pipeline.py::test_out_of_range_angle_triggers_correction PASSED [ 19%]
-tests/test_pipeline.py::test_in_range_angle_no_correction PASSED         [ 23%]
-tests/test_pipeline.py::test_low_confidence_feedback PASSED              [ 26%]
-tests/test_pipeline.py::test_feedback_cooldown_prevents_repeat_speech PASSED [ 30%]
-tests/test_pipeline.py::test_voice_can_be_disabled PASSED                [ 34%]
-tests/test_pipeline.py::test_missing_model_dir_raises PASSED             [ 38%]
-tests/test_pipeline.py::test_temporal_fallback_restores_previous_joint PASSED [ 42%]
-tests/test_pipeline.py::test_inference_interval_respected PASSED         [ 46%]
-tests/test_pipeline.py::test_target_pose_warrior_two_guidance PASSED     [ 50%]
-tests/test_pipeline.py::test_bilateral_warrior_adaptation PASSED         [ 53%]
-tests/test_pipeline.py::test_voice_worker_operation_and_shutdown PASSED  [ 57%]
-tests/test_pipeline.py::test_voice_mute_unmute_and_queue_flushing PASSED [ 61%]
-tests/test_pipeline.py::test_reference_asset_mapping PASSED              [ 65%]
-tests/test_pipeline.py::test_reference_display_auto_detect_stability PASSED [ 69%]
-tests/test_pipeline.py::test_missing_reference_asset_fallback PASSED     [ 73%]
-tests/test_pipeline.py::test_confidence_aware_feedback_tiers PASSED      [ 76%]
-tests/test_pipeline.py::test_invalid_angles_and_imputed_landmarks PASSED [ 80%]
-tests/test_pipeline.py::test_user_profile_saving_and_loading PASSED      [ 84%]
-tests/test_pipeline.py::test_joint_deviation_direction_and_severity PASSED [ 88%]
-tests/test_pipeline.py::test_front_and_rear_leg_bilateral_adaptation PASSED [ 92%]
-tests/test_pipeline.py::test_session_history_persistence PASSED          [ 96%]
-tests/test_pipeline.py::test_application_cleanup PASSED                  [100%]
-============================= 26 passed in 7.90s ==============================
-```
+
+---
+
+## 5. Zenodo Dataset Dual-Task Pipeline Evaluation
+
+The system evaluation architecture has been expanded to support the 10-Asana Zenodo dataset (`zenodo_yoga_landmarks - zenodo_yoga_landmarks.csv`, 11,118 samples) with dual prediction streams:
+- **Model A**: 10-Class Asana Classifier (`asana_label`)
+- **Model B**: Binary Form Correctness Verifier (`correctness_label`: Right vs Wrong)
+
+### 5.1 Preprocessing & Data Partitions
+- **Splitting Strategy**: Group-aware stratified split over 329 temporal burst sessions (`session_group`) stratified by `combined_label` (`{asana}_{Right|Wrong}`).
+- **Zero-Leakage Guarantee**: Group intersection between Train, Val, and Test is strictly 0.0%, preventing correlated video frame leakage across partitions.
+- **Rare Class Representation**: Minority class Vajrasana (149 samples) is represented in all three partitions: Train=88, Val=25, Test=36.
+- **Partitions**:
+  - Train: 7,993 samples (71.9%)
+  - Validation: 1,556 samples (14.0%)
+  - Test: 1,569 samples (14.1%)
+
+### 5.2 Runtime Pipeline Latency & Occlusion Benchmarks
+Measured via `scripts/evaluate_zenodo_models.py` across 300 test cycles:
+
+| Pipeline Metric | Measured Value | Standard Target | Status |
+|---|---|---|---|
+| **Feature Extraction Mean Latency** | **0.257 ms** | < 2.0 ms | Optimized |
+| **Feature Extraction P95 Latency** | **0.357 ms** | < 3.0 ms | Optimized |
+| **Pipeline Throughput Ceiling** | **3,891.3 FPS** | > 30.0 FPS | Native Real-time |
+| **Occlusion 25% Suppression Rate** | **100.0%** | > 95.0% | Verified |
+| **Occlusion 50% Suppression Rate** | **100.0%** | > 98.0% | Verified |
+
+### 5.3 Model Performance on Held-Out Test Set (Zero Group Leakage)
+
+Both **Random Forest** and **MLP** architectures were trained and evaluated on the held-out test partition (1,569 samples across unseen burst sessions):
+
+| Model Task | Metric | Random Forest (RF) | Multi-Layer Perceptron (MLP) | Deployment Status |
+|---|---|:---:|:---:|:---:|
+| **Model A: Asana Classifier** | **Accuracy** | 75.97% | **76.93%** | Active in Profile |
+| (10 Zenodo Asanas) | **Macro F1** | **0.6278** | 0.6246 | |
+| | **Weighted F1** | 75.83% | **76.37%** | |
+| **Model B: Form Verifier** | **Accuracy** | **74.25%** | 72.59% | Active in Profile |
+| (Right vs Wrong Form) | **Balanced Accuracy** | **74.34%** | 72.92% | |
+| | **Precision** | 77.58% | **77.76%** | |
+| | **Recall** | **73.16%** | 68.53% | |
+| | **F1 Score** | **0.7531** | 0.7285 | |
+| | **ROC-AUC** | **0.8393** | 0.8054 | |
+
+#### Per-Asana Form Verification Accuracy (Test Set Breakdown):
+- **Tadasana**: 97.0% (RF) / 94.4% (MLP)
+- **Sarvangasana**: 100.0% (RF) / 98.6% (MLP)
+- **Viparita Karani**: 81.4% (RF) / 83.1% (MLP)
+- **Marjariasana**: 73.4% (RF) / 73.4% (MLP)
+- **Ardhakati Chakrasana**: 72.8% (RF) / 66.7% (MLP)
+- **Bhujangasana**: 70.7% (RF) / 54.9% (MLP)
+- **Kati Chakrasana**: 69.0% (RF) / 62.1% (MLP)
+- **Anantasana**: 60.3% (RF) / 66.7% (MLP)
+- **Parvatasana**: 62.1% (RF) / 65.2% (MLP)
+- **Vajrasana** *(Minority Class, 36 test samples)*: 77.8% (RF) / 58.3% (MLP)
+
+Artifacts for both architectures are stored in:
+- Champion Deployment: [`saved_yoga_model_zenodo/`](file:///e:/Yoga_posture_project/saved_yoga_model_zenodo/)
+- Random Forest: [`saved_yoga_model_zenodo/rf/`](file:///e:/Yoga_posture_project/saved_yoga_model_zenodo/rf/)
+- MLP Perceptron: [`saved_yoga_model_zenodo/mlp/`](file:///e:/Yoga_posture_project/saved_yoga_model_zenodo/mlp/)
+- Complete Test Evaluation Report: [`data/zenodo_evaluation_report.json`](file:///e:/Yoga_posture_project/data/zenodo_evaluation_report.json)
+
 
 ---
 

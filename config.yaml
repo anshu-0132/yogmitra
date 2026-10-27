@@ -7,28 +7,33 @@
 
 # ── Saved model artifacts ─────────────────────────────────────────────────────
 model:
-  dir: saved_yoga_model
-  mediapipe_task: pose_landmarker_full.task
+  profile: zenodo               # "zenodo" (10-class dual-task) or "kaggle" (47-class)
+  dir: saved_yoga_model_zenodo
+  mediapipe_task: "pose_landmarker_heavy (1).task"
 
-  # which classifier to use for inference: "rf" (Random Forest 82.79%)
-  # or "mlp" (Neural Network 77.56%)
+  # which classifier to use for inference: "rf" (Random Forest) or "mlp" (Neural Network)
   active_classifier: rf
 
 # ── Practice / Guided Mode ────────────────────────────────────────────────────
 practice:
-  enabled: true                 # start in guided practice mode for testing
-  target_pose: "Virabhadrasana Two"  # default pose: Warrior 2 (easy to perform & test)
+  enabled: false                # pure auto-detect mode by default: matches poses from live video frames!
+  target_pose: "Tadasana"       # optional reference fallback
+
+# ── Biomechanical Anthropometric Calibration ──────────────────────────────────
+calibration:
+  auto_on_startup: true      # Prompt and run 5-second calibration on startup if uncalibrated
+  duration_seconds: 5.0      # Duration of standing baseline capture
 
 # ── Inference settings ────────────────────────────────────────────────────────
 inference:
-  # seconds between full pose-inference runs (0.5 / 1 / 2 / 3 / 5)
-  interval_seconds: 1.0
+  # seconds between full pose-inference runs (0.3 / 0.5 / 1 / 2)
+  interval_seconds: 0.5         # 0.5s for fast, responsive multi-step transitions
 
-  # frames to accumulate for majority-vote smoothing (1 = no smoothing)
-  smoothing_window: 3
+  # frames to accumulate for smoothing
+  smoothing_window: 2
 
-  # minimum softmax / RF probability to display a pose name
-  confidence_threshold: 0.35
+  # minimum probability to display a detected pose name
+  confidence_threshold: 0.28
 
   # MediaPipe landmark visibility threshold
   visibility_threshold: 0.30

@@ -6,7 +6,7 @@ from mediapipe.tasks.python import vision
 
 
 # Path to model
-MODEL_PATH = "pose_landmarker_full.task"
+MODEL_PATH = "pose_landmarker_heavy (1).task"
 
 
 # Create Pose Landmarker

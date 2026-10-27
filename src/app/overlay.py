@@ -112,23 +112,42 @@ def draw_hud(
 ) -> np.ndarray:
     """Draw the full HUD panel at the top of the frame."""
     h, w = frame.shape[:2]
-    panel_h = 42 + max_lines * 26 + 32
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (w, panel_h), CLR_PANEL, -1)
-    cv2.addWeighted(overlay, 0.70, frame, 0.30, 0, frame)
-
     lh = 26   # line height in pixels
     x0 = 12
 
     # ── Check Framing / Full Body Visibility ──────────────────────────────────
     framing_warning: Optional[str] = None
+    is_floor_or_seated = prediction.pose_name in (
+        "Vajrasana", "Parvatasana", "Bhujangasana", "Marjariasana",
+        "Sarvangasana", "Viparita Karani", "Anantasana"
+    )
     if landmarks and len(landmarks) >= 29:
         knees_ok = (landmarks[25].get("visibility", 0) >= 0.25) or (landmarks[26].get("visibility", 0) >= 0.25)
         ankles_ok = (landmarks[27].get("visibility", 0) >= 0.25) or (landmarks[28].get("visibility", 0) >= 0.25)
-        if not knees_ok and not ankles_ok:
+        if not knees_ok and not ankles_ok and not is_floor_or_seated:
             framing_warning = "CAMERA WARNING: Knees & feet cut off! Step 2-3 meters back"
-        elif not ankles_ok:
+        elif not ankles_ok and not is_floor_or_seated:
             framing_warning = "CAMERA WARNING: Feet not visible! Step back so full legs are seen"
+
+    # ── Dynamic Panel Height Calculation ──────────────────────────────────────
+    has_seq = bool(
+        hasattr(prediction, "sequence_state")
+        and prediction.sequence_state
+        and prediction.sequence_state.base_posture != "UNKNOWN"
+    )
+    extra_rows = 1  # Header
+    if has_seq:
+        extra_rows += 1
+    if prediction.top3:
+        extra_rows += 1
+    if framing_warning:
+        extra_rows += 1
+    total_rows = extra_rows + min(len(feedback_items), max_lines)
+
+    panel_h = max(115, total_rows * lh + 22)
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (w, panel_h), CLR_PANEL, -1)
+    cv2.addWeighted(overlay, 0.70, frame, 0.30, 0, frame)
 
     # ── Row 0: target / pose name + confidence + interval ─────────────────────
     interval_str = f"  |  Interval: {inference_interval:.1f}s"
@@ -147,9 +166,13 @@ def draw_hud(
             header_str = f"PRACTICE: {target_pose} (Aligning...)"
             status_colour = CLR_WARN
     else:
-        pose_str = prediction.pose_name or "—"
+        pose_str = prediction.pose_name or "Detecting..."
         conf_str = f"{prediction.confidence * 100:.0f}%"
-        header_str = f"AUTO-DETECT: {pose_str} [{conf_str}]"
+        form_str = ""
+        if hasattr(prediction, "correctness_label") and getattr(prediction, "correctness_label"):
+            corr_lbl = getattr(prediction, "correctness_label").upper()
+            form_str = f"  |  Form: {corr_lbl}"
+        header_str = f"DETECTED: {pose_str} [{conf_str}]{form_str}"
         status_colour = {
             "detected":      CLR_GOOD,
             "low_confidence":CLR_WARN,
@@ -160,23 +183,39 @@ def draw_hud(
                 (x0, lh), cv2.FONT_HERSHEY_SIMPLEX,
                 font_scale, status_colour, 1, cv2.LINE_AA)
 
-    # ── Row 1: Top 3 candidate predictions ────────────────────────────────────
+    curr_row = 2
+
+    # ── Row 1: Sequence Progression & Active Pose Candidates ──────────────────
+    if has_seq:
+        seq = prediction.sequence_state
+        cand_str = ", ".join(seq.active_candidates[:3])
+        if len(seq.active_candidates) > 3:
+            cand_str += f" +{len(seq.active_candidates) - 3}"
+        posture_lbl = seq.base_posture.replace("_", "/")
+        seq_str = f"Step {seq.step}/{seq.step_total}: {seq.step_name}  |  Base: {posture_lbl}  |  Eligible: {cand_str}"
+        cv2.putText(frame, seq_str,
+                    (x0, curr_row * lh - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale * 0.70, (100, 220, 255), 1, cv2.LINE_AA)
+        curr_row += 1
+
+    # ── Row 2: Top candidate predictions ──────────────────────────────────────
     if prediction.top3:
         top_items = [f"{name} ({prob*100:.0f}%)" for name, prob in prediction.top3[:3]]
-        top_str = "Candidates: " + "  |  ".join(top_items)
+        top_str = "Match: " + "  |  ".join(top_items)
         cv2.putText(frame, top_str,
-                    (x0, 2 * lh - 2),
+                    (x0, curr_row * lh - 2),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     font_scale * 0.70, (180, 220, 180), 1, cv2.LINE_AA)
+        curr_row += 1
 
     # ── Framing Warning Banner if user is too close ───────────────────────────
-    row_offset = 3 if prediction.top3 else 2
     if framing_warning:
         cv2.putText(frame, framing_warning,
-                    (x0, row_offset * lh),
+                    (x0, curr_row * lh - 2),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     font_scale * 0.80, (0, 140, 255), 2, cv2.LINE_AA)
-        row_offset += 1
+        curr_row += 1
 
     # ── Rows: correction messages ─────────────────────────────────────────────
     for i, item in enumerate(feedback_items[:max_lines]):
@@ -186,7 +225,7 @@ def draw_hud(
             "info":       CLR_GOOD,
         }.get(item.severity, CLR_INFO)
         cv2.putText(frame, item.instruction,
-                    (x0, (row_offset + i) * lh + 2),
+                    (x0, (curr_row + i) * lh - 2),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     font_scale * 0.80, colour, 1, cv2.LINE_AA)
 
@@ -215,7 +254,7 @@ def draw_calibration_overlay(
     cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
 
     # Title & status
-    cv2.putText(frame, "BIOMECHANICAL CALIBRATION (Tadasana)", (bx + 20, by + 30),
+    cv2.putText(frame, "5-SECOND BODY BASELINE CALIBRATION (Tadasana)", (bx + 20, by + 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
     cv2.putText(frame, status_message, (bx + 20, by + 55),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.48, (180, 220, 255), 1, cv2.LINE_AA)

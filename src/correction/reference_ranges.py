@@ -7,7 +7,22 @@ and key alignment cues for real-time guidance.
 
 from __future__ import annotations
 
+# Canonical 10 Zenodo guided asanas
+ZENODO_GUIDED_POSES: list[str] = [
+    "Tadasana",
+    "Bhujangasana",
+    "Marjariasana",
+    "Parvatasana",
+    "Ardhakati Chakrasana",
+    "Kati Chakrasana",
+    "Vajrasana",
+    "Anantasana",
+    "Sarvangasana",
+    "Viparita Karani",
+]
+
 # ── Reference angle ranges ───────────────────────────────────────────────────
+
 REFERENCE_RANGES: dict[str, dict[str, tuple[float, float]]] = {
 
     "Virabhadrasana One": {          # Warrior 1
@@ -98,7 +113,99 @@ REFERENCE_RANGES: dict[str, dict[str, tuple[float, float]]] = {
         "left_knee_angle":      (85, 115),
         "right_knee_angle":     (160, 195),
     },
+
+    # ── Zenodo 10-Asana Vocabulary (Provisional Biomechanical Baselines) ──────
+    "Anantasana": {                  # Side-Reclining Sleeping Vishnu
+        "left_elbow_angle":     (120, 180),
+        "right_elbow_angle":    (120, 180),
+        "left_knee_angle":      (150, 185),
+        "right_knee_angle":     (145, 185),
+        "left_hip_angle":       (120, 180),
+        "right_hip_angle":      (120, 180),
+    },
+
+    "Ardhakati Chakrasana": {        # Lateral Side Bend / Half Wheel
+        "left_elbow_angle":     (150, 185),
+        "right_elbow_angle":    (150, 185),
+        "left_shoulder_angle":  (40, 180),
+        "right_shoulder_angle": (40, 180),
+        "left_knee_angle":      (160, 185),
+        "right_knee_angle":     (160, 185),
+    },
+
+    "Bhujangasana": {                # Cobra Pose
+        "left_elbow_angle":     (120, 170),
+        "right_elbow_angle":    (120, 170),
+        "left_shoulder_angle":  (30, 80),
+        "right_shoulder_angle": (30, 80),
+        "left_knee_angle":      (160, 185),
+        "right_knee_angle":     (160, 185),
+        "left_hip_angle":       (140, 180),
+        "right_hip_angle":      (140, 180),
+    },
+
+    "Kati Chakrasana": {             # Standing Waist Rotating Twist
+        "left_elbow_angle":     (80, 165),
+        "right_elbow_angle":    (80, 165),
+        "left_knee_angle":      (160, 185),
+        "right_knee_angle":     (160, 185),
+        "left_shoulder_angle":  (35, 120),
+        "right_shoulder_angle": (35, 120),
+    },
+
+    "Marjariasana": {                # Cat-Cow Pose / Tabletop
+        "left_elbow_angle":     (155, 185),
+        "right_elbow_angle":    (155, 185),
+        "left_shoulder_angle":  (70, 110),
+        "right_shoulder_angle": (70, 110),
+        "left_hip_angle":       (75, 110),
+        "right_hip_angle":      (75, 110),
+        "left_knee_angle":      (75, 115),
+        "right_knee_angle":     (75, 115),
+    },
+
+    "Parvatasana": {                 # Seated Mountain Pose (arms overhead, seated/kneeling)
+        "left_elbow_angle":     (150, 185),
+        "right_elbow_angle":    (150, 185),
+        "left_shoulder_angle":  (120, 185),
+        "right_shoulder_angle": (120, 185),
+    },
+
+    "Sarvangasana": {                # Supported Shoulder Stand
+        "left_knee_angle":      (165, 185),
+        "right_knee_angle":     (165, 185),
+        "left_hip_angle":       (160, 185),
+        "right_hip_angle":      (160, 185),
+        "left_elbow_angle":     (60, 110),
+        "right_elbow_angle":    (60, 110),
+    },
+
+    "Tadasana": {                    # Mountain Pose
+        "left_knee_angle":      (165, 185),
+        "right_knee_angle":     (165, 185),
+        "left_hip_angle":       (165, 185),
+        "right_hip_angle":      (165, 185),
+        "left_elbow_angle":     (155, 185),
+        "right_elbow_angle":    (155, 185),
+    },
+
+    "Vajrasana": {                   # Thunderbolt / Kneeling Pose
+        "left_elbow_angle":     (120, 185),
+        "right_elbow_angle":    (120, 185),
+        "left_shoulder_angle":  (35, 95),
+        "right_shoulder_angle": (35, 95),
+    },
+
+    "Viparita Karani": {             # Inverted Lake / Legs-Up Pose
+        "left_knee_angle":      (160, 185),
+        "right_knee_angle":     (160, 185),
+        "left_hip_angle":       (70, 115),
+        "right_hip_angle":      (70, 115),
+        "left_elbow_angle":     (140, 185),
+        "right_elbow_angle":    (140, 185),
+    },
 }
+
 
 # ── Joint Display Names ───────────────────────────────────────────────────────
 JOINT_DISPLAY_NAMES: dict[str, str] = {
@@ -224,4 +331,146 @@ POSE_METADATA: dict[str, dict] = {
         ],
         "key_joints": ["front knee", "hips", "arms"],
     },
+
+    # ── Zenodo 10 Asanas Metadata ─────────────────────────────────────────────
+    "Anantasana": {
+        "english_name": "Sleeping Vishnu Pose",
+        "sanskrit_name": "Anantasana",
+        "asset_name": "anantasana.png",
+        "cues": [
+            "Lie on your side with bottom arm bent supporting your head",
+            "Keep torso and bottom leg in a straight aligned axis",
+            "Raise top leg upward and hold toe or maintain vertical reach",
+            "Engage core to maintain side balance without rolling back",
+        ],
+        "key_joints": ["top leg", "bottom arm", "torso line"],
+        "provisional": True,
+    },
+
+    "Ardhakati Chakrasana": {
+        "english_name": "Lateral Side Bend",
+        "sanskrit_name": "Ardhakati Chakrasana",
+        "asset_name": "ardhakati_chakrasana.png",
+        "cues": [
+            "Stand tall with feet together and weight evenly distributed",
+            "Raise one arm straight up alongside your ear",
+            "Bend torso laterally to the opposite side while exhaling",
+            "Keep both knees straight and hips facing forward",
+        ],
+        "key_joints": ["raised arm", "lateral torso", "knees"],
+        "provisional": True,
+    },
+
+    "Bhujangasana": {
+        "english_name": "Cobra Pose",
+        "sanskrit_name": "Bhujangasana",
+        "asset_name": "bhujangasana.png",
+        "cues": [
+            "Lie prone with palms under shoulders and elbows tucked close",
+            "Inhale and lift chest smoothly using back muscles",
+            "Keep elbows slightly bent, shoulders rolled down away from ears",
+            "Keep tops of feet, thighs, and pelvis firmly grounded",
+        ],
+        "key_joints": ["elbows", "shoulders", "chest lift", "lower back"],
+        "provisional": True,
+    },
+
+    "Kati Chakrasana": {
+        "english_name": "Standing Spinal Twist",
+        "sanskrit_name": "Kati Chakrasana",
+        "asset_name": "kati_chakrasana.png",
+        "cues": [
+            "Stand with feet shoulder-width apart and arms relaxed",
+            "Rotate torso smoothly from the waist toward one side",
+            "Wrap front arm across chest to opposite shoulder",
+            "Keep hips relatively stable and turn head gently with the twist",
+        ],
+        "key_joints": ["torso twist", "shoulders", "knees"],
+        "provisional": True,
+    },
+
+    "Marjariasana": {
+        "english_name": "Cat-Cow Pose",
+        "sanskrit_name": "Marjariasana",
+        "asset_name": "marjariasana.png",
+        "cues": [
+            "Begin on hands and knees in tabletop position",
+            "Stack wrists directly under shoulders and knees under hips",
+            "Exhale to arch spine upward toward ceiling (Cat)",
+            "Inhale to drop belly and lift chest and tailbone (Cow)",
+        ],
+        "key_joints": ["shoulders", "spine curve", "hips", "knees"],
+        "provisional": True,
+    },
+
+    "Parvatasana": {
+        "english_name": "Mountain / Seated Mountain Pose",
+        "sanskrit_name": "Parvatasana",
+        "asset_name": "parvatasana.png",
+        "cues": [
+            "Sit in Padmasana or stand tall, lengthening through spine",
+            "Interlock fingers and extend arms straight up overhead",
+            "Turn palms upward and press toward ceiling",
+            "Keep elbows straight and shoulders relaxed away from neck",
+        ],
+        "key_joints": ["arms overhead", "elbows", "spine lengthening"],
+        "provisional": True,
+    },
+
+    "Sarvangasana": {
+        "english_name": "Shoulder Stand",
+        "sanskrit_name": "Sarvangasana",
+        "asset_name": "sarvangasana.png",
+        "cues": [
+            "Lift legs, hips, and lower back vertically off mat",
+            "Support middle/upper back firmly with palms, elbows grounded",
+            "Straighten legs toward ceiling, drawing feet over shoulders",
+            "Keep weight on shoulders and upper arms, never on neck",
+        ],
+        "key_joints": ["vertical legs", "elbow support", "spine vertical"],
+        "provisional": True,
+    },
+
+    "Tadasana": {
+        "english_name": "Mountain Pose",
+        "sanskrit_name": "Tadasana",
+        "asset_name": "tadasana.png",
+        "cues": [
+            "Stand with feet together or hip-width, grounded through all four corners",
+            "Engage quadriceps and lift kneecaps without locking",
+            "Lengthen spine upward and roll shoulders back and down",
+            "Arms rest comfortably by sides or extend overhead with palms facing",
+        ],
+        "key_joints": ["knees straight", "neutral hips", "upright spine"],
+        "provisional": True,
+    },
+
+    "Vajrasana": {
+        "english_name": "Thunderbolt Pose",
+        "sanskrit_name": "Vajrasana",
+        "asset_name": "Vajrasana.png",
+        "cues": [
+            "Kneel on mat with big toes touching and heels parted",
+            "Sit buttocks comfortably in cavity between heels",
+            "Keep spine, neck, and head in a straight vertical line",
+            "Rest palms on thighs with elbows relaxed",
+        ],
+        "key_joints": ["knee flexion", "hip flexion", "upright spine"],
+        "provisional": True,
+    },
+
+    "Viparita Karani": {
+        "english_name": "Inverted Lake / Legs-Up Pose",
+        "sanskrit_name": "Viparita Karani",
+        "asset_name": "viparita_karani.png",
+        "cues": [
+            "Lie on back and elevate legs vertically (against wall or supported)",
+            "Keep legs straight and relaxed together",
+            "Rest arms out to sides with palms facing upward",
+            "Allow pelvis and lower back to rest comfortably on mat or bolster",
+        ],
+        "key_joints": ["legs vertical", "relaxed hips", "grounded torso"],
+        "provisional": True,
+    },
 }
+

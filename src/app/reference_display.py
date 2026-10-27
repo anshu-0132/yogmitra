@@ -55,9 +55,9 @@ class ReferenceDisplay:
         self._image_cache: dict[str, np.ndarray] = {}
 
         # Free auto-detect stability filter
-        self._detect_history: deque[str] = deque(maxlen=4)
+        self._detect_history: deque[str] = deque(maxlen=3)
         self._stable_pose: Optional[str] = None
-        self._stability_threshold: int = 3
+        self._stability_threshold: int = 2
 
         # Last rendered panel cache (pose_name, focus_joint, height) -> panel
         self._cached_key: Optional[tuple[str, Optional[str], int]] = None
@@ -73,7 +73,7 @@ class ReferenceDisplay:
         self,
         predicted_pose: Optional[str],
         confidence: float,
-        min_confidence: float = 0.50,
+        min_confidence: float = 0.30,
     ) -> Optional[str]:
         """
         Smooths auto-detected pose predictions to prevent image flickering.
@@ -93,7 +93,7 @@ class ReferenceDisplay:
                 if count >= self._stability_threshold:
                     self._stable_pose = most_common
 
-        return self._stable_pose
+        return self._stable_pose or (predicted_pose if confidence >= min_confidence else None)
 
     def _load_asset(self, asset_filename: str, max_size: int = 300) -> Optional[np.ndarray]:
         """Load and cache asset image from disk."""
@@ -253,3 +253,38 @@ class ReferenceDisplay:
         self._cached_key = cache_key
         self._cached_panel = panel
         return panel.copy()
+
+
+# Guided practice pose collections by model profile
+KAGGLE_GUIDED_POSES: list[str] = [
+    "Virabhadrasana Two",
+    "Virabhadrasana One",
+    "Utkatasana",
+    "Trikonasana",
+    "Phalakasana",
+    "Adho Mukha Svanasana",
+    "Vrksasana",
+    "Uttanasana",
+    "Anjaneyasana",
+]
+
+ZENODO_GUIDED_POSES: list[str] = [
+    "Tadasana",
+    "Bhujangasana",
+    "Marjariasana",
+    "Parvatasana",
+    "Ardhakati Chakrasana",
+    "Kati Chakrasana",
+    "Vajrasana",
+    "Anantasana",
+    "Sarvangasana",
+    "Viparita Karani",
+]
+
+
+def get_target_poses_for_profile(profile: str = "kaggle") -> list[str]:
+    """Return available guided practice poses for the specified model profile."""
+    if profile.lower() == "zenodo":
+        return list(ZENODO_GUIDED_POSES)
+    return list(KAGGLE_GUIDED_POSES)
+

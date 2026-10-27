@@ -26,6 +26,8 @@ def _patch_config(cfg: dict, args: argparse.Namespace) -> dict:
         cfg["inference"]["interval_seconds"] = args.interval
     if args.classifier is not None:
         cfg["model"]["active_classifier"] = args.classifier
+    if args.profile is not None:
+        cfg["model"]["profile"] = args.profile
     if args.no_voice:
         cfg["voice"]["enabled"] = False
     if args.camera is not None:
@@ -37,6 +39,10 @@ def _patch_config(cfg: dict, args: argparse.Namespace) -> dict:
         cfg["practice"]["enabled"] = True
     if args.free:
         cfg["practice"]["enabled"] = False
+    if getattr(args, "calibrate", False):
+        if "calibration" not in cfg:
+            cfg["calibration"] = {}
+        cfg["calibration"]["force_startup"] = True
     return cfg
 
 
@@ -46,22 +52,28 @@ def main() -> None:
     )
     parser.add_argument("--config", default="config.yaml",
                         help="Path to config YAML (default: config.yaml)")
+    parser.add_argument("--profile", choices=["kaggle", "zenodo"], default=None,
+                        help="Active model profile: 'kaggle' (47-class default) or 'zenodo' (10-class dual-task)")
     parser.add_argument("--interval", type=float, default=None,
                         help="Inference interval in seconds (overrides config)")
     parser.add_argument("--classifier", choices=["rf", "mlp"], default=None,
                         help="Active classifier (overrides config)")
     parser.add_argument("--target-pose", default=None,
-                        help="Target pose to practice (default: Virabhadrasana Two)")
+                        help="Target pose to practice (default: Virabhadrasana Two or Tadasana)")
     parser.add_argument("--free", action="store_true",
-                        help="Start in free auto-detect mode across all 47 poses")
+                        help="Start in free auto-detect mode")
     parser.add_argument("--no-voice", action="store_true",
                         help="Disable voice feedback")
     parser.add_argument("--test-voice", action="store_true",
                         help="Run audio speaker diagnostic test and exit")
     parser.add_argument("--history", action="store_true",
-                        help="Display practice session history from SQLite and exit")
+                        help="Display practice session history table from SQLite and exit")
+    parser.add_argument("--progress", action="store_true",
+                        help="Display comprehensive longitudinal progress and personalization report and exit")
     parser.add_argument("--camera", type=int, default=None,
                         help="Camera device index (overrides config)")
+    parser.add_argument("--calibrate", action="store_true",
+                        help="Force 5-second body baseline calibration on startup")
     args = parser.parse_args()
 
     if args.test_voice:
@@ -74,6 +86,13 @@ def main() -> None:
         tracker = ProgressTracker()
         print("\n" + tracker.format_history_table(limit=15) + "\n")
         sys.exit(0)
+
+    if args.progress:
+        from src.correction.progress_tracker import ProgressTracker
+        tracker = ProgressTracker()
+        print("\n" + tracker.format_progress_report(limit=15) + "\n")
+        sys.exit(0)
+
 
     cfg_path = ROOT / args.config
     if not cfg_path.exists():

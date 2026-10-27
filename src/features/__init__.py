@@ -129,6 +129,25 @@ def extract_features(
         else:
             angle_features[name] = _calculate_angle(*pts)
 
+    # Ankle angle sanitization against camera bottom-edge truncation:
+    # When a person is standing upright (shoulders above hips, hips above knees),
+    # their feet rest flat on the floor (true anatomical angle ~75°-105°).
+    # If the camera frame truncates the feet (ankles or toes near bottom y >= 0.86),
+    # MediaPipe defaults the toes straight down, fabricating an artificial ~170°-180° angle
+    # that confounds standing poses with inversion poses (Viparita Karani / Sarvangasana).
+    if len(landmarks) >= 33:
+        sy = (float(landmarks[11].get("y", 0.5)) + float(landmarks[12].get("y", 0.5))) / 2.0
+        hy = (float(landmarks[23].get("y", 0.5)) + float(landmarks[24].get("y", 0.5))) / 2.0
+        ky = (float(landmarks[25].get("y", 0.5)) + float(landmarks[26].get("y", 0.5))) / 2.0
+        is_standing_upright = (hy - sy > 0.08) and (ky - hy > 0.06)
+        if is_standing_upright:
+            if float(landmarks[27].get("y", 0.0)) > 0.86 or float(landmarks[31].get("y", 0.0)) > 0.92:
+                if angle_features.get("left_ankle_angle", 0) > 135.0:
+                    angle_features["left_ankle_angle"] = 90.0
+            if float(landmarks[28].get("y", 0.0)) > 0.86 or float(landmarks[32].get("y", 0.0)) > 0.92:
+                if angle_features.get("right_ankle_angle", 0) > 135.0:
+                    angle_features["right_ankle_angle"] = 90.0
+
     # ── Normalised distances ──────────────────────────────────────────────────
     named_pts: dict[str, Optional[np.ndarray]] = {
         name: _get_point(landmarks, idx, width, height)

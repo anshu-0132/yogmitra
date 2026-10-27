@@ -146,7 +146,6 @@ def get_adapted_ranges(
     if pose_name in lunge_poses:
         lk = feature_dict.get("left_knee_angle", np.nan)
         rk = feature_dict.get("right_knee_angle", np.nan)
-        # If right knee is bent deeper than left knee, right is the leading leg
         if np.isfinite(lk) and np.isfinite(rk) and rk < lk:
             ranges["right_knee_angle"] = (85, 115)
             ranges["left_knee_angle"] = (160, 185)
@@ -172,14 +171,37 @@ def get_adapted_ranges(
             role_map["left_knee_angle"] = "raised foot knee"
             role_map["right_knee_angle"] = "standing leg"
 
-    # Apply personalized tolerance multiplier if calibration profile exists
-    if user_profile and "tolerance_multiplier" in user_profile:
-        mult = float(user_profile.get("tolerance_multiplier", 1.0))
-        if 0.8 <= mult <= 1.4 and mult != 1.0:
-            for k, (low, high) in ranges.items():
-                span = (high - low) / 2.0
-                mid = (high + low) / 2.0
-                ranges[k] = (round(mid - span * mult, 1), round(mid + span * mult, 1))
+    # Zenodo bilateral poses:
+    elif pose_name == "Ardhakati Chakrasana":  # Lateral Side Bend
+        ls = feature_dict.get("left_shoulder_angle", np.nan)
+        rs = feature_dict.get("right_shoulder_angle", np.nan)
+        if np.isfinite(ls) and np.isfinite(rs) and rs > ls:
+            role_map["right_shoulder_angle"] = "raised arm"
+            role_map["left_shoulder_angle"] = "lowered arm"
+            ranges["right_shoulder_angle"] = (150, 185)
+            ranges["left_shoulder_angle"] = (20, 60)
+        elif np.isfinite(ls) and np.isfinite(rs) and ls > rs:
+            role_map["left_shoulder_angle"] = "raised arm"
+            role_map["right_shoulder_angle"] = "lowered arm"
+            ranges["left_shoulder_angle"] = (150, 185)
+            ranges["right_shoulder_angle"] = (20, 60)
+
+    elif pose_name == "Anantasana":  # Side-Reclining Sleeping Vishnu
+        lk = feature_dict.get("left_knee_angle", np.nan)
+        rk = feature_dict.get("right_knee_angle", np.nan)
+        lh = feature_dict.get("left_hip_angle", np.nan)
+        rh = feature_dict.get("right_hip_angle", np.nan)
+        if np.isfinite(lh) and np.isfinite(rh) and lh < rh:
+            role_map["left_knee_angle"] = "raised leg knee"
+            role_map["right_knee_angle"] = "bottom leg knee"
+        else:
+            role_map["right_knee_angle"] = "raised leg knee"
+            role_map["left_knee_angle"] = "bottom leg knee"
+
+    # Apply measurable biomechanical personalization from user profile
+    if user_profile:
+        from src.correction.calibration import apply_biomechanical_personalization
+        ranges = apply_biomechanical_personalization(ranges, user_profile, pose_name)
 
     return ranges, role_map
 
@@ -193,10 +215,11 @@ def evaluate(
     imputed_flags: list[int],
     imputed_fraction_limit: float = 0.35,
     user_profile: Optional[dict] = None,
+    reliability_assessment: Optional[Any] = None,
 ) -> PostureEvaluation:
     """
     Evaluates posture against biomechanical targets with multi-tier reliability,
-    severity categorization, and composite 0-100% alignment scoring.
+    severity categorization, temporal jitter suppression, and composite 0-100% alignment scoring.
     """
     imputed_fraction = float(np.mean(imputed_flags)) if imputed_flags else 0.0
 
@@ -261,6 +284,13 @@ def evaluate(
                 if tier == "high":
                     tier = "medium"
 
+        # Apply stateful temporal reliability tracker if provided
+        if reliability_assessment and hasattr(reliability_assessment, "joint_assessments"):
+            j_rel = reliability_assessment.joint_assessments.get(angle_name)
+            if j_rel:
+                tier = j_rel.tier
+                reliable = j_rel.is_reliable
+
         # ── Angle Value ───────────────────────────────────────────────────────
         value_raw = feature_dict.get(angle_name, np.nan)
         try:
@@ -269,7 +299,8 @@ def evaluate(
             value = np.nan
 
         if not reliable or not np.isfinite(value):
-            action_hint = f"Keep your {display} clearly visible."
+            action_hint = f"Keep your {display} clearly visible and steady."
+
             checks.append(AngleCheck(
                 angle_name=angle_name,
                 display_name=display,

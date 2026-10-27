@@ -87,25 +87,56 @@ def run(config_input: str | Path | dict = "config.yaml") -> None:
     display_cfg   = cfg["display"]
     voice_cfg     = cfg["voice"]
 
-    # ── Load artifacts ────────────────────────────────────────────────────────
+    # ── Model Profile & Artifacts ─────────────────────────────────────────────
+    requested_profile = model_cfg.get("profile", "kaggle").lower()
     model_dir = Path(model_cfg["dir"])
     task_path = str(model_cfg["mediapipe_task"])
-    print(f"[App] Loading model artifacts from: {model_dir.resolve()}")
-    try:
-        artifacts = load_artifacts(model_dir)
-    except RuntimeError as exc:
-        sys.exit(f"[App] FATAL: {exc}")
+    active_profile = requested_profile
 
-    print(f"[App] Classifier: {model_cfg['active_classifier'].upper()}, "
-          f"classes: {artifacts.n_classes}, features: {artifacts.n_features}")
-
-    # ── Inference engine ──────────────────────────────────────────────────────
-    inferrer = PoseInference(
-        artifacts=artifacts,
-        active_classifier=model_cfg["active_classifier"],
-        confidence_threshold=infer_cfg["confidence_threshold"],
-        smoothing_window=infer_cfg["smoothing_window"],
+    zenodo_dir = _ROOT / "saved_yoga_model_zenodo"
+    zenodo_ready = (
+        (zenodo_dir / "zenodo_asana_classifier.joblib").exists() and
+        (zenodo_dir / "zenodo_form_verifier.joblib").exists() and
+        (zenodo_dir / "zenodo_preprocessing.joblib").exists()
     )
+
+    if requested_profile == "zenodo":
+        if zenodo_ready:
+            print(f"[App] Loading Zenodo Dual-Task Model from: {zenodo_dir.resolve()}")
+            try:
+                from src.models.model_loader import load_zenodo_artifacts
+                from src.models.inference import DualTaskInference
+                clf_choice = model_cfg.get("active_classifier", "rf")
+                artifacts = load_zenodo_artifacts(zenodo_dir, active_classifier=clf_choice)
+                inferrer = DualTaskInference(
+                    artifacts=artifacts,
+                    confidence_threshold=infer_cfg["confidence_threshold"],
+                    smoothing_window=infer_cfg["smoothing_window"],
+                )
+                print(f"[App] Zenodo Profile Active: 10 Asanas + Right/Wrong Form Verifier ({artifacts.model_type.upper()})")
+            except Exception as exc:
+                print(f"[App] Zenodo load error: {exc}. Falling back to Kaggle profile.")
+                active_profile = "kaggle"
+        else:
+            print("[App] Zenodo profile requested, but trained Zenodo artifacts are pending training run approval.")
+            print("[App] Falling back safely to verified Kaggle 47-class model.")
+            active_profile = "kaggle"
+
+    if active_profile == "kaggle":
+        print(f"[App] Loading Kaggle model artifacts from: {model_dir.resolve()}")
+        try:
+            artifacts = load_artifacts(model_dir)
+        except RuntimeError as exc:
+            sys.exit(f"[App] FATAL: {exc}")
+
+        inferrer = PoseInference(
+            artifacts=artifacts,
+            active_classifier=model_cfg["active_classifier"],
+            confidence_threshold=infer_cfg["confidence_threshold"],
+            smoothing_window=infer_cfg["smoothing_window"],
+        )
+        print(f"[App] Kaggle Profile Active: {model_cfg['active_classifier'].upper()}, "
+              f"classes: {artifacts.n_classes}, features: {artifacts.n_features}")
 
     # ── MediaPipe ─────────────────────────────────────────────────────────────
     if not Path(task_path).exists():
@@ -124,11 +155,13 @@ def run(config_input: str | Path | dict = "config.yaml") -> None:
     if not voice_cfg["enabled"]:
         voice._enabled = False
 
-    # ── Feedback engine ───────────────────────────────────────────────────────
+    # ── Feedback engine & Reliability Tracker ─────────────────────────────────
     feedback_engine = FeedbackEngine(
         cooldown_seconds=voice_cfg["cooldown_seconds"],
         max_display=display_cfg["max_feedback_lines"],
     )
+    from src.correction.reliability_tracker import TemporalReliabilityTracker
+    reliability_tracker = TemporalReliabilityTracker(min_visibility=infer_cfg["visibility_threshold"])
 
     # ── Reference Display Panel (Right side) ──────────────────────────────────
     ref_display = ReferenceDisplay(
@@ -138,11 +171,19 @@ def run(config_input: str | Path | dict = "config.yaml") -> None:
 
     # ── User Biomechanical Calibration ───────────────────────────────────────
     user_profile = load_profile(_ROOT / "data" / "user_profile.json")
-    calib_session = CalibrationSession(save_path=_ROOT / "data" / "user_profile.json")
-    if user_profile.calibrated:
+    calib_cfg = cfg.get("calibration", {})
+    calib_duration = float(calib_cfg.get("duration_seconds", 5.0))
+    calib_session = CalibrationSession(duration_seconds=calib_duration, save_path=_ROOT / "data" / "user_profile.json")
+
+    force_calib = calib_cfg.get("force_startup", False)
+    auto_calib = calib_cfg.get("auto_on_startup", True)
+    if force_calib or (not user_profile.calibrated and auto_calib):
+        calib_session.start()
+        voice.speak("Welcome to Yoga Mitra. Please stand tall in front of the camera for 5 seconds to calibrate your body baseline.")
+        print("[App] Starting 5-second body baseline calibration. Stand tall in Mountain Pose (Tadasana)...")
+    elif user_profile.calibrated:
         print(f"[App] Loaded user profile: {user_profile.user_name} (Calibrated: {user_profile.calibration_date})")
-    else:
-        print("[App] Default user profile loaded. Press C anytime to run Mountain Pose calibration.")
+        print("[App] Press 'C' anytime to re-calibrate your 5-second body baseline.")
 
     # ── Session Progress Tracker ──────────────────────────────────────────────
     progress_tracker = ProgressTracker(db_path=_ROOT / "data" / "yoga_sessions.db")
@@ -156,23 +197,15 @@ def run(config_input: str | Path | dict = "config.yaml") -> None:
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, camera_cfg["height"])
 
     # ── Practice / Target Mode ────────────────────────────────────────────────
+    from src.app.reference_display import get_target_poses_for_profile
     practice_cfg = cfg.get("practice", {})
-    target_mode: bool = practice_cfg.get("enabled", True)
-    initial_pose: str = practice_cfg.get("target_pose", "Virabhadrasana Two")
+    target_mode: bool = practice_cfg.get("enabled", False)
 
-    practice_poses = [
-        "Virabhadrasana Two",     # Warrior 2
-        "Virabhadrasana One",     # Warrior 1
-        "Utkatasana",             # Chair Pose
-        "Trikonasana",            # Triangle Pose
-        "Phalakasana",            # High Plank
-        "Adho Mukha Svanasana",   # Downward-Facing Dog
-        "Vrksasana",              # Tree Pose
-        "Uttanasana",             # Standing Forward Bend
-        "Anjaneyasana",           # Low Lunge
-    ]
+    practice_poses = get_target_poses_for_profile(active_profile)
+    default_pose = practice_poses[0] if practice_poses else "Tadasana"
+    initial_pose: str = practice_cfg.get("target_pose", default_pose)
     if initial_pose not in practice_poses:
-        practice_poses.insert(0, initial_pose)
+        initial_pose = default_pose
     target_idx: int = practice_poses.index(initial_pose)
 
     # ── State ─────────────────────────────────────────────────────────────────
@@ -193,9 +226,10 @@ def run(config_input: str | Path | dict = "config.yaml") -> None:
     screenshot_dir = _ROOT / "screenshots"
     screenshot_dir.mkdir(parents=True, exist_ok=True)
 
-    mode_label = f"Guided Practice [{practice_poses[target_idx]}]" if target_mode else "Auto-Detect"
+    mode_label = f"Guided Practice [{practice_poses[target_idx]}]" if target_mode else "Pure Auto-Detect (Dynamic Frame Matching)"
     print(f"[App] Starting in {mode_label}.")
-    print("[App] Controls: Q=Quit, T/N=Change Pose, M=Guided/Free, C=Calibrate, V=Voice, A=Angles")
+    print("[App] System will automatically match video frames to asanas in real time.")
+    print("[App] Controls: Q=Quit, M=Toggle Auto-Detect/Guided, C=Calibrate, V=Voice, A=Angles")
     print("[App] Starting main loop…")
 
     # ── Main loop ─────────────────────────────────────────────────────────────
@@ -220,7 +254,7 @@ def run(config_input: str | Path | dict = "config.yaml") -> None:
             if calib_done and new_prof is not None:
                 user_profile = new_prof
                 progress_tracker.calibrated = True
-                voice.speak("Calibration complete! Your biomechanical baseline is saved.")
+                voice.speak("Calibration complete! Your body baseline is locked. You may begin your practice.")
                 print(f"[App] {calib_msg}")
 
         if raw_lm is None:
@@ -250,6 +284,9 @@ def run(config_input: str | Path | dict = "config.yaml") -> None:
             prev_raw_landmarks = raw_for_history
             last_lm_effective  = effective_lm
 
+            # ── Temporal Reliability & Jitter Tracking ────────────────────────
+            rel_assessment = reliability_tracker.update(effective_lm, flags)
+
             h, w = frame_raw.shape[:2]
             feat_dict = extract_features(effective_lm, flags, w, h)
             last_features = feat_dict
@@ -259,8 +296,8 @@ def run(config_input: str | Path | dict = "config.yaml") -> None:
                 last_inference_time = now
                 feat_series = features_to_series(feat_dict, artifacts.feature_cols)
 
-                # Predict
-                prediction = inferrer.predict(feat_series)
+                # Predict with gravitational posture prior & calibrated baseline
+                prediction = inferrer.predict(feat_series, landmarks=effective_lm, user_profile=user_profile)
                 last_prediction = prediction
 
                 # Evaluate posture: in target mode, evaluate against active target pose
@@ -271,8 +308,10 @@ def run(config_input: str | Path | dict = "config.yaml") -> None:
                     landmarks=effective_lm,
                     imputed_flags=flags,
                     user_profile=asdict(user_profile) if user_profile.calibrated else None,
+                    reliability_assessment=rel_assessment,
                 )
                 last_eval_result = eval_result
+
 
                 # Update joints to highlight on skeleton
                 highlight_joint_ids.clear()
@@ -410,7 +449,7 @@ def run(config_input: str | Path | dict = "config.yaml") -> None:
         elif key == ord("c"):                            # C → start/cancel calibration
             if not calib_session.is_active:
                 calib_session.start()
-                voice.speak("Stand tall in Mountain Pose for calibration.")
+                voice.speak("Stand tall in Mountain Pose for 5 seconds to calibrate your body baseline.")
                 print("[App] Calibration started. Stand tall in Mountain Pose (Tadasana)...")
             else:
                 calib_session.cancel()
